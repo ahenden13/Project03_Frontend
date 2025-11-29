@@ -42,7 +42,7 @@ export const defaultTheme: Theme = { // this is just grey scale for now - based 
     text: '#e0e0e0',        // soft white
     textMuted: '#bdbdbd',   // muted grey
     border: '#2c2c2c',      // divider
-    accent: '#9e9e9e',      // subtle underline
+    accent: '#3A8DFF',      // primary accent (blue)
   },
   radius: { sm: 6, md: 10, lg: 14 },
   space:  { xs: 6, sm: 10, md: 16, lg: 24, xl: 32 },

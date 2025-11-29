@@ -1,4 +1,5 @@
 import db from './db';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type SeedResult = {
   users: { id: number; username: string }[];
@@ -106,16 +107,48 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
     }
   }
 
+  // Helper to ensure a user with given email exists and is recorded in createdUsers
+  async function ensureUser(username: string, email: string) {
+    const existing = await db.getUserByEmail(email);
+    if (existing && existing.userId) {
+      // avoid duplicates in createdUsers
+      if (!createdUsers.find(u => u.id === existing.userId)) createdUsers.push({ id: existing.userId, username: existing.username });
+      return existing.userId as number;
+    }
+    const id = await db.createUser({ username, email });
+    createdUsers.push({ id, username });
+    return id;
+  }
 
-  // Create users
-  const alice = await db.createUser({ username: 'alice', email: 'alice@example.com' });
-  createdUsers.push({ id: alice, username: 'alice' });
+  // Detect currently-signed-in user's email (if any) and ensure a local user exists
+  const signedInEmail = await AsyncStorage.getItem('userEmail');
+  let primaryUserId: number | null = null;
+  if (signedInEmail) {
+    const existing = await db.getUserByEmail(signedInEmail);
+    if (existing && existing.userId) {
+      if (!createdUsers.find(u => u.id === existing.userId)) createdUsers.push({ id: existing.userId, username: existing.username });
+      primaryUserId = existing.userId;
+    } else {
+      const uname = signedInEmail.split('@')[0];
+      const nid = await db.createUser({ username: uname, email: signedInEmail });
+      createdUsers.push({ id: nid, username: uname });
+      primaryUserId = nid;
+    }
+  }
 
-  const bob = await db.createUser({ username: 'bob', email: 'bob@example.com' });
-  createdUsers.push({ id: bob, username: 'bob' });
+  // Create (or ensure) example users
+  const alice = await ensureUser('alice', 'alice@example.com');
+  const bob = await ensureUser('bob', 'bob@example.com');
+  const carol = await ensureUser('carol', 'carol@example.com');
 
-  const carol = await db.createUser({ username: 'carol', email: 'carol@example.com' });
-  createdUsers.push({ id: carol, username: 'carol' });
+  // If we detected a signed-in user, prefer them as the first created user for deterministic seeding
+  if (primaryUserId) {
+    const idx = createdUsers.findIndex(u => u.id === primaryUserId);
+    if (idx > 0) {
+      const [u] = createdUsers.splice(idx, 1);
+      createdUsers.unshift(u);
+    }
+  }
 
   // Create friendships (Alice <-> Bob accepted, Bob <-> Carol accepted)
   const fr1 = await db.sendFriendRequest(alice, bob);
@@ -159,6 +192,7 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
 
   // Bob free slots (lunch window, afternoon focus)
   const b1 = await db.addFreeTime({ userId: bob, startTime: inOneHour, endTime: in3Hours });
+  createdEvents.push({ id: b1, ownerId: bob, title: 'Lunch window (free)' });
   // create a friendly event to show as a friend's event in the calendar
   const be1 = await db.createEvent({ userId: bob, eventTitle: 'Bob: Team Standup', description: 'Daily sync', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
   createdEvents.push({ id: be1, ownerId: bob, title: 'Team Standup' });
@@ -273,6 +307,49 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
     // if RSVP functions are unavailable or fail for native reasons, continue without blocking seed
     // eslint-disable-next-line no-console
     console.warn('seed: rsvp creation failed', e);
+  }
+
+  // Dev helper: print primary local user id that was targeted by the seeder so devs can easily set localStorage for testing
+  try {
+    const targetId = primaryUserId ?? (createdUsers && createdUsers.length > 0 ? createdUsers[0].id : null);
+    // Dev: automatically write numeric local userId to storage so Home loads seeded events immediately
+    if (__DEV__) {
+      try {
+        if (typeof AsyncStorage !== 'undefined' && AsyncStorage.setItem) {
+          await AsyncStorage.setItem('userId', String(targetId));
+        }
+      } catch (e) {
+        // ignore AsyncStorage write errors
+      }
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem('userId', String(targetId));
+        }
+      } catch (e) {
+        // ignore localStorage write errors
+      }
+
+      // Also persist a friendly userName and email for dev convenience
+      try {
+        const u = await db.getUserById(Number(targetId));
+        if (u) {
+          if (u.username) {
+            try { await AsyncStorage.setItem('userName', String(u.username)); } catch {}
+            try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('userName', String(u.username)); } catch {}
+          }
+          if (u.email) {
+            try { await AsyncStorage.setItem('userEmail', String(u.email)); } catch {}
+            try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('userEmail', String(u.email)); } catch {}
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[seedDummyData] primary local userId: ${targetId} — stored to storage for dev (localStorage and AsyncStorage).`);
+  } catch (e) {
+    // ignore logging errors
   }
 
   return { users: createdUsers, events: createdEvents, friends: createdFriends, notifications: createdNotifications, rsvps: createdRsvps };
