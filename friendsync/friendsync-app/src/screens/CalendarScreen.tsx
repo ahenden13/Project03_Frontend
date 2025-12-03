@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { View, Text, TouchableOpacity, Dimensions, ScrollView, Modal, TextInput, Button } from "react-native";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Calendar } from "react-native-calendars"; // Calendar library
 import { useTheme } from "../lib/ThemeProvider";
@@ -32,7 +33,9 @@ export default function CalendarScreen() {
   // ---------------------------
 
   // Data loaded from DB
-  const [currentUserId, setCurrentUserId] = useState<number>(1); // seeded user id
+  // Start as null so the UI does not prematurely assume seeded user 1
+  // (we will set this once AsyncStorage/auth resolves the numeric local id)
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [myAvailability, setMyAvailability] = useState<any[]>([]);
   const [friendAvailability, setFriendAvailability] = useState<any[]>([]);
   const [myEvents, setMyEvents] = useState<any[]>([]);
@@ -236,7 +239,13 @@ export default function CalendarScreen() {
     let maxPills = Math.floor(availableForPills / perItem);
     if (!Number.isFinite(maxPills) || maxPills < 0) maxPills = 0;
 
+    const pad2 = (v: number) => (v < 10 ? `0${v}` : String(v));
+    const formatLocalYMD = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+    const todayKey = formatLocalYMD(new Date());
+    const isToday = date && date.dateString === todayKey;
+
     // If nothing fits vertically, show a compact count indicator
+    const TODAY_BADGE_SIZE = 22;
     if (maxPills === 0) {
       return (
         <View
@@ -250,21 +259,29 @@ export default function CalendarScreen() {
             backgroundColor: state === "disabled" ? "#1c1c1c10" : "transparent",
           }}
         >
-          <Text
-            style={{
-              color: state === "disabled" ? t.color.textMuted : t.color.text,
-              fontWeight: "600",
-              fontSize: 11,
-              marginBottom: 1,
-            }}
-          >
-            {date.day}
-          </Text>
-          {entries.length > 0 && (
-            <Text style={{ color: t.color.textMuted, fontSize: 11 }}>
-              {entries.length} item{entries.length !== 1 ? 's' : ''}
-            </Text>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {isToday ? (
+              <View style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 11 }}>{date.day}</Text>
+              </View>
+            ) : (
+              <Text
+                style={{
+                  color: state === "disabled" ? t.color.textMuted : t.color.text,
+                  fontWeight: "600",
+                  fontSize: 11,
+                  marginBottom: 1,
+                }}
+              >
+                {date.day}
+              </Text>
+            )}
+            {entries.length > 0 && (
+              <Text style={{ color: t.color.textMuted, fontSize: 11 }}>
+                {entries.length} item{entries.length !== 1 ? 's' : ''}
+              </Text>
+            )}
+          </View>
         </View>
       );
     }
@@ -365,16 +382,22 @@ export default function CalendarScreen() {
           backgroundColor: state === "disabled" ? "#1c1c1c10" : "transparent",
         }}
       >
-        <Text
-          style={{
-            color: state === "disabled" ? t.color.textMuted : t.color.text,
-            fontWeight: "600",
-            fontSize: 11,
-            marginBottom: 1,
-          }}
-        >
-          {date.day}
-        </Text>
+        {isToday ? (
+          <View style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 11 }}>{date.day}</Text>
+          </View>
+        ) : (
+          <Text
+            style={{
+              color: state === "disabled" ? t.color.textMuted : t.color.text,
+              fontWeight: "600",
+              fontSize: 11,
+              marginBottom: 1,
+            }}
+          >
+            {date.day}
+          </Text>
+        )}
 
         {visible.map(renderPill)}
         {showMoreAsPill && renderMorePill(moreCount, date.dateString)}
@@ -393,6 +416,19 @@ export default function CalendarScreen() {
   // eslint-disable-next-line no-console
   // console.log('Calendar: loadData called', { currentUserId });
     setLoadingData(true);
+    // If the current user id is not yet resolved (e.g. during app startup
+    // while AsyncStorage or auth finishes), avoid running DB queries that
+    // expect a numeric userId. This prevents the UI from showing seeded
+    // user #1 (or throwing) before resolution.
+    if (currentUserId == null) {
+      // Clear any prior data so the calendar renders empty while waiting
+      setMyEvents([]);
+      setMyAvailability([]);
+      setFriendAvailability([]);
+      setInvitedEvents([]);
+      if (mountedRef.current) setLoadingData(false);
+      return;
+    }
     try {
       await db.init_db();
 
@@ -498,6 +534,40 @@ export default function CalendarScreen() {
     loadData();
     return () => { mountedRef.current = false; };
   }, [loadData]);
+
+  // Resolve the numeric local `userId` for the calendar on mount.
+  // This mirrors the logic in HomeScreen so the calendar shows the same user's data.
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await db.init_db();
+        const userIdStr = await AsyncStorage.getItem('userId');
+        const uid = userIdStr ? Number(userIdStr) : NaN;
+        let resolvedUserId = Number.isFinite(uid) && !Number.isNaN(uid) ? uid : null;
+
+        if (resolvedUserId == null) {
+          const userEmail = await AsyncStorage.getItem('userEmail');
+          if (userEmail) {
+            const u = await db.getUserByEmail(userEmail);
+            if (u && u.userId) resolvedUserId = Number(u.userId);
+          }
+        }
+
+        // Dev fallback: pick the first user if still unresolved
+        if (resolvedUserId == null && __DEV__) {
+          const all = await db.getAllUsers();
+          if (all && all.length > 0) resolvedUserId = all[0].userId;
+        }
+
+        if (mounted) setCurrentUserId(resolvedUserId);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('Calendar: failed to resolve userId', err);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   // --- Modals ---
   const closeModal = () => { setModalType(null); setModalPayload(null); };
@@ -719,8 +789,19 @@ export default function CalendarScreen() {
             // simple validation: require a title for events
             return;
           }
+          if (currentUserId == null) {
+            // Guard: user id not resolved yet
+            // eslint-disable-next-line no-console
+            console.warn('Calendar: save attempted but currentUserId is not resolved');
+            return;
+          }
           await db.createEvent({ userId: currentUserId, eventTitle: title || 'Event', description: description || undefined, startTime: isoStart, endTime: isoEnd, date, isEvent: 1, recurring: recurringCode });
         } else {
+          if (currentUserId == null) {
+            // eslint-disable-next-line no-console
+            console.warn('Calendar: save attempted but currentUserId is not resolved');
+            return;
+          }
           await db.addFreeTime({ userId: currentUserId, startTime: isoStart, endTime: isoEnd });
         }
       }
@@ -856,7 +937,7 @@ export default function CalendarScreen() {
               <TouchableOpacity onPress={closeModal} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: '#e6e6e6', borderRadius: 8, marginRight: 8 }}>
                 <Text style={{ color: '#000' }}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={save} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: '#3A8DFF', borderRadius: 8 }}>
+              <TouchableOpacity onPress={save} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: t.color.accent, borderRadius: 8 }}>
                 <Text style={{ color: '#fff' }}>Save</Text>
               </TouchableOpacity>
             </View>

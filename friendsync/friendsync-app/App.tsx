@@ -22,19 +22,22 @@ import { Platform, StyleSheet } from 'react-native';
 
 // Add this right after imports, before your component
 if (Platform.OS === 'web') {
-  // Inject global styles for web scrolling
   const style = document.createElement('style');
   style.textContent = `
     html, body, #root {
       height: 100%;
-      overflow: auto;
     }
+
     body {
-      overflow-y: scroll;
+      margin: 0;
+      overflow-y: auto;
+      /* Reserve space for the scrollbar without forcing it to appear/disappear */
+      scrollbar-gutter: stable;
     }
   `;
   document.head.appendChild(style);
 }
+//updated to hopefully prevent flickering issues on web
 
 //--------
 

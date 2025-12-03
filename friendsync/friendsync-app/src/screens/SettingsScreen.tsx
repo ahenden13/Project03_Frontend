@@ -71,7 +71,7 @@ export default function SettingsScreen() {
 
   // Style for availability blocks (blue, like HomeScreen)
   const eventCellStyle = {
-    backgroundColor: '#3A8DFF',
+    backgroundColor: t.color.accent,
   };
 
   // Default scroll position to start near morning hours

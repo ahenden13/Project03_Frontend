@@ -195,7 +195,7 @@ export default function WelcomeScreen() {
         {__DEV__ && (secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
           <View style={{ marginTop: t.space.md, width: '80%', alignItems: 'stretch' }}>
             <View style={{ marginTop: t.space.sm }}>
-              <Button title="Hide debug" onPress={() => setSecretRevealed(false)} color={t.color.accent} />
+              <Button title="Hide debug" onPress={() => { setSecretRevealed(false); setDump(null); setStatus(null); }} color={t.color.accent} />
             </View>
             <View style={{ marginTop: t.space.sm }}>
               <View style={{ marginTop: t.space.xs }}>
@@ -206,6 +206,9 @@ export default function WelcomeScreen() {
               </View>
               <View style={{ marginTop: t.space.xs }}>
                 <Button title="Seed DB (dev)" onPress={runSeed} color={'#27ae60'} />
+              </View>
+              <View style={{ marginTop: t.space.xs }}>
+                <Button title="Rerun seed (dev)" onPress={runSeed} color={'#2ecc71'} />
               </View>
               <View style={{ marginTop: t.space.xs }}>
                 <Button title="Show fallback DB" onPress={showFallback} color={t.color.accent} />

@@ -1,4 +1,5 @@
 import db from './db';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type SeedResult = {
   users: { id: number; username: string }[];
@@ -13,7 +14,7 @@ type SeedResult = {
  * Call this in development only. The function is automatically attached to globalThis.seedDummyData
  * when running in __DEV__ so you can call it from the debugger console.
  */
-export async function seedDummyData(opts?: { force?: boolean; randomize?: boolean; randomCount?: number; randomSeed?: number }): Promise<SeedResult> {
+export async function seedDummyData(opts?: { force?: boolean; randomize?: boolean; randomCount?: number; randomSeed?: number; days?: number; randomTimes?: boolean }): Promise<SeedResult> {
   if (!__DEV__ && !((globalThis as any).__FORCE_SEED__ === true)) {
     throw new Error('seedDummyData can only be run in development unless __FORCE_SEED__ is set.');
   }
@@ -106,16 +107,48 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
     }
   }
 
+  // Helper to ensure a user with given email exists and is recorded in createdUsers
+  async function ensureUser(username: string, email: string) {
+    const existing = await db.getUserByEmail(email);
+    if (existing && existing.userId) {
+      // avoid duplicates in createdUsers
+      if (!createdUsers.find(u => u.id === existing.userId)) createdUsers.push({ id: existing.userId, username: existing.username });
+      return existing.userId as number;
+    }
+    const id = await db.createUser({ username, email });
+    createdUsers.push({ id, username });
+    return id;
+  }
 
-  // Create users
-  const alice = await db.createUser({ username: 'alice', email: 'alice@example.com' });
-  createdUsers.push({ id: alice, username: 'alice' });
+  // Detect currently-signed-in user's email (if any) and ensure a local user exists
+  const signedInEmail = await AsyncStorage.getItem('userEmail');
+  let primaryUserId: number | null = null;
+  if (signedInEmail) {
+    const existing = await db.getUserByEmail(signedInEmail);
+    if (existing && existing.userId) {
+      if (!createdUsers.find(u => u.id === existing.userId)) createdUsers.push({ id: existing.userId, username: existing.username });
+      primaryUserId = existing.userId;
+    } else {
+      const uname = signedInEmail.split('@')[0];
+      const nid = await db.createUser({ username: uname, email: signedInEmail });
+      createdUsers.push({ id: nid, username: uname });
+      primaryUserId = nid;
+    }
+  }
 
-  const bob = await db.createUser({ username: 'bob', email: 'bob@example.com' });
-  createdUsers.push({ id: bob, username: 'bob' });
+  // Create (or ensure) example users
+  const alice = await ensureUser('alice', 'alice@example.com');
+  const bob = await ensureUser('bob', 'bob@example.com');
+  const carol = await ensureUser('carol', 'carol@example.com');
 
-  const carol = await db.createUser({ username: 'carol', email: 'carol@example.com' });
-  createdUsers.push({ id: carol, username: 'carol' });
+  // If we detected a signed-in user, prefer them as the first created user for deterministic seeding
+  if (primaryUserId) {
+    const idx = createdUsers.findIndex(u => u.id === primaryUserId);
+    if (idx > 0) {
+      const [u] = createdUsers.splice(idx, 1);
+      createdUsers.unshift(u);
+    }
+  }
 
   // Create friendships (Alice <-> Bob accepted, Bob <-> Carol accepted)
   const fr1 = await db.sendFriendRequest(alice, bob);
@@ -159,6 +192,7 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
 
   // Bob free slots (lunch window, afternoon focus)
   const b1 = await db.addFreeTime({ userId: bob, startTime: inOneHour, endTime: in3Hours });
+  createdEvents.push({ id: b1, ownerId: bob, title: 'Lunch window (free)' });
   // create a friendly event to show as a friend's event in the calendar
   const be1 = await db.createEvent({ userId: bob, eventTitle: 'Bob: Team Standup', description: 'Daily sync', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
   createdEvents.push({ id: be1, ownerId: bob, title: 'Team Standup' });
@@ -170,6 +204,72 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
   createdEvents.push({ id: ce2, ownerId: carol, title: 'Coffee' });
 
   // end additional seed entries
+
+  // --- More examples across several days ---
+  // Create a set of predictable example events across the next 7 days so
+  // the calendar shows multi-day content for development without relying
+  // on random seeds. These are lightweight, deterministic examples.
+  try {
+    // Support an adjustable number of days (default 7, max 30). If `randomTimes`
+    // is true, vary per-user start times within sensible windows using the
+    // seeded RNG so results can be deterministic when `randomSeed` is provided.
+    const requestedDays = typeof opts?.days === 'number' ? Math.max(1, Math.min(30, Math.floor(opts!.days))) : 7;
+    const DAYS = requestedDays;
+    const randomTimes = !!opts?.randomTimes;
+    for (let d = 0; d < DAYS; d++) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() + d);
+      const dayIso = new Date(day.getFullYear(), day.getMonth(), day.getDate()).toISOString();
+
+      // Determine per-user start hours. If randomTimes is enabled, pick a
+      // time within a sensible window for each user using the seeded RNG.
+      const aliceHour = randomTimes ? randInt(7, 11) : 9;
+      const aliceMinute = randomTimes ? pick([0, 15, 30, 45]) : 0;
+      const aliceStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aliceHour, aliceMinute, 0).toISOString();
+      const aliceEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aliceHour, aliceMinute + 30, 0).toISOString();
+      const aEv = await db.createEvent({ userId: createdUsers[0].id, eventTitle: `Alice: Daily Sync (day ${d+1})`, description: 'Daily quick sync', startTime: aliceStart, endTime: aliceEnd, date: dayIso });
+      createdEvents.push({ id: aEv, ownerId: createdUsers[0].id, title: `Alice: Daily Sync (day ${d+1})` });
+
+      // Bob: lunch window on weekdays at ~12:00-13:00 (skip weekend-like indices).
+      // If randomTimes is enabled, shift the lunch start between 11-13:30.
+      const bobIndex = createdUsers.findIndex(u => u.username === 'bob');
+      if (bobIndex >= 0) {
+        const dow = day.getDay(); // 0=Sun,6=Sat
+        if (dow !== 0 && dow !== 6) {
+          const bobHour = randomTimes ? randInt(11, 13) : 12;
+          const bobMinute = randomTimes ? pick([0, 15, 30]) : 0;
+          const bobStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), bobHour, bobMinute, 0).toISOString();
+          const bobEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), bobHour + 1, bobMinute, 0).toISOString();
+          const bEv = await db.createEvent({ userId: createdUsers[bobIndex].id, eventTitle: `Bob: Lunch (day ${d+1})`, description: 'Team lunch', startTime: bobStart, endTime: bobEnd, date: dayIso });
+          createdEvents.push({ id: bEv, ownerId: createdUsers[bobIndex].id, title: `Bob: Lunch (day ${d+1})` });
+        }
+      }
+
+      // Carol: study session on even days at ~18:00-20:00. If randomTimes is
+      // enabled, pick an evening start between 17-20.
+      const carolIndex = createdUsers.findIndex(u => u.username === 'carol');
+      if (carolIndex >= 0 && (d % 2) === 0) {
+        const carolHour = randomTimes ? randInt(17, 20) : 18;
+        const carolMinute = randomTimes ? pick([0, 15, 30]) : 0;
+        const cStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), carolHour, carolMinute, 0).toISOString();
+        const cEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), carolHour + 2, carolMinute, 0).toISOString();
+        const cEv = await db.createEvent({ userId: createdUsers[carolIndex].id, eventTitle: `Carol: Study (day ${d+1})`, description: 'Study group', startTime: cStart, endTime: cEnd, date: dayIso });
+        createdEvents.push({ id: cEv, ownerId: createdUsers[carolIndex].id, title: `Carol: Study (day ${d+1})` });
+      }
+
+      // Additionally add a free-time slot for Alice mid-afternoon on odd days
+      if ((d % 2) === 1) {
+        const aftHour = randomTimes ? randInt(14, 16) : 15;
+        const ftS = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aftHour, 0, 0).toISOString();
+        const ftE = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aftHour + 1, 0, 0).toISOString();
+        const ftId2 = await db.addFreeTime({ userId: createdUsers[0].id, startTime: ftS, endTime: ftE });
+        createdEvents.push({ id: ftId2, ownerId: createdUsers[0].id, title: 'Afternoon free' });
+      }
+    }
+  } catch (e) {
+    // non-fatal for seed
+    // eslint-disable-next-line no-console
+    console.warn('seed: multi-day examples failed', e);
+  }
 
   // If requested, generate additional randomized events/free-time slots.
   if (opts && opts.randomize) {
@@ -207,6 +307,49 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
     // if RSVP functions are unavailable or fail for native reasons, continue without blocking seed
     // eslint-disable-next-line no-console
     console.warn('seed: rsvp creation failed', e);
+  }
+
+  // Dev helper: print primary local user id that was targeted by the seeder so devs can easily set localStorage for testing
+  try {
+    const targetId = primaryUserId ?? (createdUsers && createdUsers.length > 0 ? createdUsers[0].id : null);
+    // Dev: automatically write numeric local userId to storage so Home loads seeded events immediately
+    if (__DEV__) {
+      try {
+        if (typeof AsyncStorage !== 'undefined' && AsyncStorage.setItem) {
+          await AsyncStorage.setItem('userId', String(targetId));
+        }
+      } catch (e) {
+        // ignore AsyncStorage write errors
+      }
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem('userId', String(targetId));
+        }
+      } catch (e) {
+        // ignore localStorage write errors
+      }
+
+      // Also persist a friendly userName and email for dev convenience
+      try {
+        const u = await db.getUserById(Number(targetId));
+        if (u) {
+          if (u.username) {
+            try { await AsyncStorage.setItem('userName', String(u.username)); } catch {}
+            try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('userName', String(u.username)); } catch {}
+          }
+          if (u.email) {
+            try { await AsyncStorage.setItem('userEmail', String(u.email)); } catch {}
+            try { if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem('userEmail', String(u.email)); } catch {}
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[seedDummyData] primary local userId: ${targetId} — stored to storage for dev (localStorage and AsyncStorage).`);
+  } catch (e) {
+    // ignore logging errors
   }
 
   return { users: createdUsers, events: createdEvents, friends: createdFriends, notifications: createdNotifications, rsvps: createdRsvps };

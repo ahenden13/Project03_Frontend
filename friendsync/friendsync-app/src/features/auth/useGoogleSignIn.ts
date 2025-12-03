@@ -35,17 +35,36 @@ export function useGoogleSignIn() {
 
       const u = auth.currentUser;
       if (u) {
-        await setDoc(
-          doc(firestore, "users", u.uid),
-          {
-            uid: u.uid,
-            email: u.email,
-            displayName: u.displayName,
-            photoURL: u.photoURL,
-            lastLogin: new Date(),
-          },
-          { merge: true }
-        );
+        try {
+          await setDoc(
+            doc(firestore, "users", u.uid),
+            {
+              uid: u.uid,
+              email: u.email,
+              displayName: u.displayName,
+              photoURL: u.photoURL,
+              lastLogin: new Date(),
+            },
+            { merge: true }
+          );
+        } catch (err: any) {
+          // If Firestore rules prevent writes, log details but don't fail sign-in.
+          // Common cause: Firestore security rules require request.auth.uid == userId
+          // or admin-only writes. Inspect console logs and Firestore rules in Firebase Console.
+          // eslint-disable-next-line no-console
+          console.warn('[Auth] setDoc(users/<uid>) failed', err?.code ?? err?.message ?? err);
+        }
+      }
+
+      // Ensure a numeric local DB user exists for this Firebase user
+      if (u) {
+        try {
+          await ensureLocalUserInDB(u);
+        } catch (err) {
+          // non-fatal
+          // eslint-disable-next-line no-console
+          console.warn('[Auth] ensureLocalUserInDB failed (web)', err);
+        }
       }
 
       await initialSync();
@@ -81,18 +100,34 @@ export function useGoogleSignIn() {
 
         const u = auth.currentUser;
         if (u) {
-          await setDoc(
-            doc(firestore, "users", u.uid), // ← Changed to 'firestore'
-            {
-              uid: u.uid,
-              email: u.email,
-              displayName: u.displayName,
-              photoURL: u.photoURL,
-              lastLogin: new Date(),
-            },
-            { merge: true }
-          );
+          try {
+            await setDoc(
+              doc(firestore, "users", u.uid), // ← Changed to 'firestore'
+              {
+                uid: u.uid,
+                email: u.email,
+                displayName: u.displayName,
+                photoURL: u.photoURL,
+                lastLogin: new Date(),
+              },
+              { merge: true }
+            );
+          } catch (err: any) {
+            // eslint-disable-next-line no-console
+            console.warn('[Auth] setDoc(users/<uid>) failed (native)', err?.code ?? err?.message ?? err);
+          }
         }
+        // Ensure a numeric local DB user exists for this Firebase user (native flow)
+        if (u) {
+          try {
+            await ensureLocalUserInDB(u);
+          } catch (err) {
+            // non-fatal
+            // eslint-disable-next-line no-console
+            console.warn('[Auth] ensureLocalUserInDB failed (native)', err);
+          }
+        }
+
         await initialSync();   
         return u;
       }
@@ -112,7 +147,7 @@ export function useGoogleSignIn() {
     
     await signOut(auth);
     
-    await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail']);
+    await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName', 'firebaseUid']);
     
     console.log("[Auth] Logged out and sync stopped");
 
@@ -137,8 +172,21 @@ export function useGoogleSignIn() {
 
       // 3. Save auth data to storage
       await AsyncStorage.setItem('authToken', token);
-      await AsyncStorage.setItem('userId', user.uid);
+      // Preserve Firebase UID separately for backend sync
+      await AsyncStorage.setItem('firebaseUid', user.uid);
       await AsyncStorage.setItem('userEmail', user.email || '');
+
+      // Ensure a local DB user exists for this signed-in user and store the local numeric id.
+      // Mapping/creation is handled by `ensureLocalUserInDB` which is called during sign-in.
+      // Here we only invoke it as a fallback when no `userId` is already present in storage.
+      try {
+        const existingId = await AsyncStorage.getItem('userId');
+        if (!existingId) {
+          await ensureLocalUserInDB(user);
+        }
+      } catch (e) {
+        console.warn('[Auth] failed to verify/create local user for signed-in account', e);
+      }
 
       // 4. Set up sync
       simpleSync.setAuthToken(token);
@@ -154,6 +202,41 @@ export function useGoogleSignIn() {
     }
 
   };
+
+  // Ensure a numeric local DB user exists for the given Firebase user.
+  // Returns the numeric local userId or null on failure.
+  async function ensureLocalUserInDB(u: any): Promise<number | null> {
+    try {
+      await db.init_db();
+      let local = null;
+      if (u.email) local = await db.getUserByEmail(u.email);
+      let localId: number | null = null;
+      if (local && local.userId) {
+        localId = Number(local.userId);
+      } else {
+        const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
+        localId = await db.createUser({ username: uname, email: u.email || '' });
+      }
+      if (localId != null) {
+        await AsyncStorage.setItem('userId', String(localId));
+        await AsyncStorage.setItem('userEmail', u.email || '');
+        // store a human-friendly name for UI
+        try {
+          const lu = await db.getUserById(localId);
+          if (lu && lu.username) await AsyncStorage.setItem('userName', String(lu.username));
+        } catch (e) {
+          // ignore
+        }
+        // persist firebase uid too
+        if (u.uid) await AsyncStorage.setItem('firebaseUid', String(u.uid));
+      }
+      return localId;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[Auth] ensureLocalUserInDB failed', err);
+      return null;
+    }
+  }
 
 
   return { signIn, logout };

@@ -1,10 +1,12 @@
 // src/screens/HomeScreen.tsx
 
-import React, { useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity } from 'react-native';
+import React, { useMemo, useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, Modal, StyleSheet, ScrollView, Button } from 'react-native';
 import Screen from '../components/ScreenTmp';
 import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import db from '../lib/db';
 
 
 // --- Helper: shift date by N days ---
@@ -50,8 +52,75 @@ export default function HomeScreen() {
     []
   );
 
+  // State: events loaded from local DB for the current signed-in user
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+  const [dbEvents, setDbEvents] = useState<any[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await db.init_db();
+        const userIdStr = await AsyncStorage.getItem('userId');
+        const userEmail = await AsyncStorage.getItem('userEmail');
+        const uid = userIdStr ? Number(userIdStr) : NaN;
+        let resolvedUserId = Number.isFinite(uid) && !Number.isNaN(uid) ? uid : null;
+
+        // If userId stored is a non-numeric Firebase UID (string), try to locate
+        // a mapped local user by email. Otherwise in dev, fall back to first seeded user.
+        if (resolvedUserId == null && userEmail) {
+          try {
+            const u = await db.getUserByEmail(userEmail);
+            if (u && u.userId) resolvedUserId = Number(u.userId);
+          } catch (e) { /* ignore */ }
+        }
+
+        if (resolvedUserId == null && __DEV__) {
+          try {
+            const all = await db.getAllUsers();
+            if (all && all.length > 0) resolvedUserId = all[0].userId;
+          } catch (e) { /* ignore */ }
+        }
+
+        if (mounted) setCurrentUserId(resolvedUserId);
+
+        if (resolvedUserId != null) {
+          // load events and free time
+          const myEv = await db.getEventsForUser(resolvedUserId);
+          const myFt = await db.getFreeTimeForUser(resolvedUserId);
+
+          // normalize to BigCalendar event shape
+          const mappedEvents = (myEv || []).map((e: any) => ({
+            title: e.eventTitle ?? e.title ?? e.description ?? 'Event',
+            start: e.startTime ? new Date(e.startTime) : (e.date ? new Date(e.date) : new Date()),
+            end: e.endTime ? new Date(e.endTime) : (e.startTime ? new Date(e.startTime) : new Date()),
+            type: (e.isEvent === 0 || e.isEvent === false) ? 'availability' : 'hosted',
+            raw: e,
+          }));
+
+          const mappedFree = (myFt || []).map((f: any) => ({
+            title: f.eventTitle ?? f.title ?? 'Free Time',
+            start: f.startTime ? new Date(f.startTime) : new Date(),
+            end: f.endTime ? new Date(f.endTime) : new Date(new Date().getTime() + 60 * 60 * 1000),
+            type: 'availability',
+            raw: f,
+          }));
+
+          if (mounted) setDbEvents([...mappedEvents, ...mappedFree]);
+        }
+      } catch (err) {
+        // swallow silently — fall back to dummy events
+        // eslint-disable-next-line no-console
+        console.warn('HomeScreen: failed to load DB events', err);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
   // --- Filter events to only show those in current week ---
-  const visibleEvents = dummyEvents.filter(
+  // Prefer DB-loaded events for the signed-in user, otherwise fall back to dummyEvents
+  const sourceEvents = (dbEvents && dbEvents.length > 0) ? dbEvents : dummyEvents;
+  const visibleEvents = sourceEvents.filter(
     e => e.start >= startDate && e.start <= endDate
   );
 
@@ -63,16 +132,30 @@ export default function HomeScreen() {
   // --- Event colors ---
   const eventCellStyle = (event: any) => {
     switch (event.type) {
-      case 'availability':
-        return { backgroundColor: '#3A8DFF' }; // blue
+          case 'availability':
+        return { backgroundColor: t.color.accent, borderWidth: 1, borderColor: '#1f74e6' }; // use theme accent with thin darker border
       case 'hosted':
-        return { backgroundColor: '#FF3B30' }; // red
+        return { backgroundColor: '#FF3B30', borderWidth: 1, borderColor: '#d12a24' }; // red with thin darker border
       case 'invited':
-        return { backgroundColor: '#AF52DE' }; // purple
+        return { backgroundColor: '#AF52DE', borderWidth: 1, borderColor: '#8b32c6' }; // purple with thin darker border
       default:
-        return { backgroundColor: '#ccc' }; // fallback grey
+        return { backgroundColor: '#ccc', borderWidth: 1, borderColor: '#999' }; // fallback grey with border
     }
   };
+
+  // --- Modal state for event details ---
+  const [selectedEvent, setSelectedEvent] = useState<any | null>(null);
+  const [modalVisible, setModalVisible] = useState(false);
+
+  function openEventModal(ev: any) {
+    setSelectedEvent(ev);
+    setModalVisible(true);
+  }
+
+  function closeEventModal() {
+    setSelectedEvent(null);
+    setModalVisible(false);
+  }
 
   return (
     <Screen>
@@ -133,7 +216,7 @@ export default function HomeScreen() {
       >
         {/* Availability */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <View style={{ width: 14, height: 14, borderRadius: 3, backgroundColor: '#3A8DFF' }} />
+          <View style={{ width: 14, height: 14, borderRadius: 3, backgroundColor: t.color.accent }} />
           <Text style={{ color: t.color.text }}>Availability</Text>
         </View>
         {/* Hosted Event */}
@@ -157,12 +240,64 @@ export default function HomeScreen() {
           mode="week" // week view
           scrollOffsetMinutes={scrollOffsetMinutes} // auto-scroll to first event
           eventCellStyle={eventCellStyle} // style function for events
+          onPressEvent={(ev: any) => openEventModal(ev)}
           swipeEnabled={false} // disable swipe between weeks
           showTime={true} // show time labels
           headerContainerStyle={{ backgroundColor: 'transparent' }} // remove default header background
           hourStyle={{ color: t.color.textMuted }} // color of hour labels
         />
       </View>
+
+      {/* --- Event Details Modal --- */}
+      <Modal visible={modalVisible} animationType="slide" transparent={true} onRequestClose={closeEventModal}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { backgroundColor: t.color.surface || '#fff' }]}>
+            <ScrollView>
+              <Text style={[styles.modalTitle, { color: t.color.text }]}>{selectedEvent?.title ?? 'Event'}</Text>
+              <Text style={{ color: t.color.textMuted, marginBottom: 8 }}>
+                {selectedEvent ? `${selectedEvent.start.toLocaleString()} — ${selectedEvent.end.toLocaleString()}` : ''}
+              </Text>
+              <Text style={{ color: t.color.text, marginBottom: 12 }}>{selectedEvent?.raw?.description ?? 'No description'}</Text>
+
+              <Text style={{ color: t.color.textMuted, fontWeight: '600', marginBottom: 6 }}>Type</Text>
+              <Text style={{ color: t.color.text, marginBottom: 12 }}>{selectedEvent?.type ?? 'unknown'}</Text>
+
+              {selectedEvent?.raw?.userId != null && (
+                <>
+                  <Text style={{ color: t.color.textMuted, fontWeight: '600', marginBottom: 6 }}>Owner</Text>
+                  <Text style={{ color: t.color.text, marginBottom: 12 }}>{String(selectedEvent.raw.userId)}</Text>
+                </>
+              )}
+
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+                <Button title="Close" onPress={closeEventModal} />
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 720,
+    borderRadius: 12,
+    padding: 16,
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+});

@@ -229,6 +229,26 @@ export async function getUserByUsername(username: string): Promise<any | null> {
   return db.users.find(u => u.username === username) ?? null;
 }
 
+export async function getUserByEmail(email: string): Promise<any | null> {
+  await tryInitNative();
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE email = ?;', [email]);
+    return (res.rows && res.rows._array && res.rows._array[0]) ?? null;
+  }
+  const db = await loadFallback();
+  return db.users.find(u => u.email === email) ?? null;
+}
+
+export async function getAllUsers(): Promise<any[]> {
+  await tryInitNative();
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users;');
+    return res.rows._array as any[];
+  }
+  const db = await loadFallback();
+  return db.users.slice();
+}
+
 export async function updateUser(id: number, fields: { username?: string; email?: string; password?: string; phone_number?: string | null }) {
   await tryInitNative();
   if (useNative && nativeDb) {
@@ -601,6 +621,11 @@ export default {
   setUserPreferences,
   getUserPreferences,
   
+  // New helpers
+  getUserByEmail,
+  getAllUsers,
+
   getStatus,
 };
+
 
