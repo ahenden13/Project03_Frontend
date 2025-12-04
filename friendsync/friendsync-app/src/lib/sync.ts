@@ -3,7 +3,7 @@
 import * as db from './db';
 
 // backend URL
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com/';
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com';
 
 // How often to sync (5 minutes)
 const SYNC_INTERVAL = 5 * 60 * 1000;
@@ -49,8 +49,8 @@ export async function syncFromBackend(userId: number): Promise<void> {
     const userIdParam = String(userId);
 
     // Fetch all data from backend
-    const [users, events, friends, rsvps, notifications, preferences] = await Promise.all([
-      fetchFromBackend(`/api/users/${userIdParam}`).catch(() => null),
+    const [allUsers, events, friends, rsvps, notifications, preferences] = await Promise.all([
+      fetchFromBackend(`/api/users`).catch(() => null),
       fetchFromBackend(`/api/events/user/${userIdParam}`).catch(() => []),
       fetchFromBackend(`/api/friends/user/${userIdParam}`).catch(() => []),
       fetchFromBackend(`/api/rsvps/user/${userIdParam}`).catch(() => []),
@@ -58,15 +58,27 @@ export async function syncFromBackend(userId: number): Promise<void> {
       fetchFromBackend(`/api/preferences/${userIdParam}`).catch(() => null),
     ]);
 
-    // Store users
-    if (users) {
-      const existing = await db.getUserById(users.userId);
-      if (existing) {
-        await db.updateUser(users.userId, users);
-      } else {
-        await db.createUser(users);
-      }
+if (Array.isArray(allUsers)) {
+  for (const user of allUsers) {
+    const existing = await db.getUserById(user.userId);
+    if (existing) {
+      await db.updateUser(user.userId, {
+        username: user.username,
+        email: user.email,
+        phone_number: user.phoneNumber || user.phone_number || null,
+      });
+    } else {
+      await db.createUser({
+        username: user.username,
+        email: user.email,
+        password: undefined,
+        phone_number: user.phoneNumber || user.phone_number || null,
+      });
     }
+  }
+  console.log(`✅ Synced ${allUsers.length} users`);
+}
+
 
     // Store events - clear and re-add all
     const existingEvents = await db.getEventsForUser(userId);
