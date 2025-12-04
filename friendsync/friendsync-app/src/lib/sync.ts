@@ -3,7 +3,7 @@
 import * as db from './db';
 
 // backend URL
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com/';
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com';
 
 // How often to sync (5 minutes)
 const SYNC_INTERVAL = 5 * 60 * 1000;
@@ -50,12 +50,12 @@ export async function syncFromBackend(userId: number): Promise<void> {
 
     // Fetch all data from backend
     const [allUsers, events, friends, rsvps, notifications, preferences] = await Promise.all([
-      fetchFromBackend(`/users`).catch(() => null),
-      fetchFromBackend(`/events/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/friends/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/rsvps/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/notifications/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/preferences/${userIdParam}`).catch(() => null),
+      fetchFromBackend(`/api/users`).catch(() => null),
+      fetchFromBackend(`/api/events/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/friends/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/rsvps/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/notifications/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/preferences/${userIdParam}`).catch(() => null),
     ]);
 
 if (Array.isArray(allUsers)) {
