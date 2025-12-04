@@ -49,8 +49,8 @@ export async function syncFromBackend(userId: number): Promise<void> {
     const userIdParam = String(userId);
 
     // Fetch all data from backend
-    const [users, events, friends, rsvps, notifications, preferences] = await Promise.all([
-      fetchFromBackend(`/users/${userIdParam}`).catch(() => null),
+    const [allUsers, events, friends, rsvps, notifications, preferences] = await Promise.all([
+      fetchFromBackend(`/users`).catch(() => null),
       fetchFromBackend(`/events/user/${userIdParam}`).catch(() => []),
       fetchFromBackend(`/friends/user/${userIdParam}`).catch(() => []),
       fetchFromBackend(`/rsvps/user/${userIdParam}`).catch(() => []),
@@ -58,15 +58,27 @@ export async function syncFromBackend(userId: number): Promise<void> {
       fetchFromBackend(`/preferences/${userIdParam}`).catch(() => null),
     ]);
 
-    // Store users
-    if (users) {
-      const existing = await db.getUserById(users.userId);
-      if (existing) {
-        await db.updateUser(users.userId, users);
-      } else {
-        await db.createUser(users);
-      }
+if (Array.isArray(allUsers)) {
+  for (const user of allUsers) {
+    const existing = await db.getUserById(user.userId);
+    if (existing) {
+      await db.updateUser(user.userId, {
+        username: user.username,
+        email: user.email,
+        phone_number: user.phoneNumber || user.phone_number || null,
+      });
+    } else {
+      await db.createUser({
+        username: user.username,
+        email: user.email,
+        password: undefined,
+        phone_number: user.phoneNumber || user.phone_number || null,
+      });
     }
+  }
+  console.log(`✅ Synced ${allUsers.length} users`);
+}
+
 
     // Store events - clear and re-add all
     const existingEvents = await db.getEventsForUser(userId);
