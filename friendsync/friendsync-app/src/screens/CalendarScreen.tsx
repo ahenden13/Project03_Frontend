@@ -265,7 +265,7 @@ export default function CalendarScreen() {
     // If nothing fits vertically, show a compact count indicator
     if (maxPills === 0) {
       return (
-        <View
+        <Pressable onPress={() => openCreateModal(date.dateString)}
           style={{
             width: dayCellWidth,
             height: dayCellHeight,
@@ -299,7 +299,7 @@ export default function CalendarScreen() {
               </Text>
             )}
           </View>
-        </View>
+        </Pressable>
       );
     }
 
@@ -360,7 +360,7 @@ export default function CalendarScreen() {
     }
 
     return (
-      <View
+      <Pressable onPress={() => openCreateModal(date.dateString)}
         style={{
           width: dayCellWidth,
           height: dayCellHeight,
@@ -372,11 +372,11 @@ export default function CalendarScreen() {
         }}
       >
         {isToday ? (
-          <Pressable onPress={() => { if ((dataByDate[date.dateString] || []).length === 0) openCreateModal(date.dateString); }} style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ color: '#fff', fontWeight: '700', fontSize: 11 }}>{date.day}</Text>
-          </Pressable>
+          </View>
         ) : (
-          <Pressable onPress={() => { if ((dataByDate[date.dateString] || []).length === 0) openCreateModal(date.dateString); }} style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, alignItems: 'center', justifyContent: 'center' }}>
             <Text
               style={{
                 color: state === "disabled" ? t.color.textMuted : t.color.text,
@@ -387,12 +387,12 @@ export default function CalendarScreen() {
             >
               {date.day}
             </Text>
-          </Pressable>
+          </View>
         )}
 
         {visible.map(renderPill)}
         {showMoreAsPill && renderMorePill(moreCount, date.dateString)}
-      </View>
+      </Pressable>
     );
   };
 
