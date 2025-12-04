@@ -50,12 +50,12 @@ export async function syncFromBackend(userId: number): Promise<void> {
 
     // Fetch all data from backend
     const [users, events, friends, rsvps, notifications, preferences] = await Promise.all([
-      fetchFromBackend(`/users/${userIdParam}`).catch(() => null),
-      fetchFromBackend(`/events/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/friends/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/rsvps/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/notifications/user/${userIdParam}`).catch(() => []),
-      fetchFromBackend(`/preferences/${userIdParam}`).catch(() => null),
+      fetchFromBackend(`/api/users/${userIdParam}`).catch(() => null),
+      fetchFromBackend(`/api/events/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/friends/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/rsvps/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/notifications/user/${userIdParam}`).catch(() => []),
+      fetchFromBackend(`/api/preferences/${userIdParam}`).catch(() => null),
     ]);
 
     // Store users
