@@ -6,13 +6,19 @@ import FriendsScreen from '../screens/FriendsScreen';
 import AuthScreen from '../screens/AuthScreen';
 import TopNav from '../components/TopNav';
 import AccountCreationScreen from '../screens/AccountCreationScreen';
-import LandingScreen from '../screens/LandingScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import NotificationsScreen from '../screens/NotificationsScreen';
+import WelcomeScreen from '../screens/WelcomeScreen';
+import ApiTestScreen from '../screens/ApiTestScreen';
+
+// auth hook
+import { useAuth } from '../features/auth/AuthProvider';
 
 const Stack = createStackNavigator();
 
 export default function RootNavigator() {
+  const { user } = useAuth(); // null until signed in
+
   return (
     <Stack.Navigator
       // apply TopNav as global header
@@ -20,53 +26,64 @@ export default function RootNavigator() {
         header: (props) => <TopNav {...props} />,
       }}
     >
-      {/* Main app screens */}
-      <Stack.Screen
-        name="Home"
-        component={HomeScreen}
-        options={{ title: 'Home' }}
-      />
-      <Stack.Screen
-        name="Calendar"
-        component={CalendarScreen}
-        options={{ title: 'Calendar' }}
-      />
-      <Stack.Screen
-        name="Events"
-        component={EventsScreen}
-        options={{ title: 'Events' }}
-      />
-      <Stack.Screen
-        name="Friends"
-        component={FriendsScreen}
-        options={{ title: 'Friends' }}
-      />
-      {/* Placeholder for future login/register */}
-      <Stack.Screen
-        name="Auth"
-        component={AuthScreen}
-        options={{ title: 'Authentication' }}
-      />
-      <Stack.Screen
-        name="AccountCreation"
-        component={AccountCreationScreen}
-        options={{ title: 'Account Creation' }}
-      />
-      <Stack.Screen
-        name="Landing"
-        component={LandingScreen}
-        options={{ title: 'Landing' }}
-      />
-      <Stack.Screen
-        name="Settings"
-        component={SettingsScreen}
-        options={{ title: 'Settings' }}
-      />
-      <Stack.Screen
-        name="Notifications"
-        component={NotificationsScreen}
-        options={{ title: 'Notifications' }}
-      />
+      {/*  show ONLY Auth screen until signed in -justin */}
+      {!user ? (
+        <Stack.Screen
+          name="Auth"
+          component={AuthScreen}
+          options={{ title: 'Authentication' }}
+        />
+      ) : (
+        <>
+          {/* Main app screens */}
+          <Stack.Screen
+            name="Welcome"
+            component={WelcomeScreen}
+            options={{ title: 'Welcome' }}
+          />
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{ title: 'Home' }}
+          />
+          <Stack.Screen
+            name="Calendar"
+            component={CalendarScreen}
+            options={{ title: 'Calendar' }}
+          />
+          <Stack.Screen
+            name="Events"
+            component={EventsScreen}
+            options={{ title: 'Events' }}
+          />
+          <Stack.Screen
+            name="Friends"
+            component={FriendsScreen}
+            options={{ title: 'Friends' }}
+          />
+          {/* Placeholder for future login/register */}
+          <Stack.Screen
+            name="AccountCreation"
+            component={AccountCreationScreen}
+            options={{ title: 'Account Creation' }}
+          />
+          <Stack.Screen
+            name="Settings"
+            component={SettingsScreen}
+            options={{ title: 'Settings' }}
+          />
+          <Stack.Screen
+            name="Notifications"
+            component={NotificationsScreen}
+            options={{ title: 'Notifications' }}
+          />
+          <Stack.Screen 
+            name="ApiTest" 
+            component={ApiTestScreen}
+            options={{ title: 'API Test' }}
+          />
+        </>
+      )}
     </Stack.Navigator>
   );
 }

@@ -1,21 +1,33 @@
-import { View, Text, Pressable, Platform } from 'react-native';
+import { View, Text, Pressable, Platform, TouchableOpacity } from 'react-native';
 import type { StackHeaderProps } from '@react-navigation/stack';
 import { useRoute } from '@react-navigation/native';
 import { useTheme } from '../lib/ThemeProvider';
+import HomeScreen from '../screens/HomeScreen';
+import ApiTestScreen from '../screens/ApiTestScreen';
+// NEW: imports for auth state and sign-out
+import { useAuth } from '../features/auth/AuthProvider';
+import { auth } from '../lib/firebase.native';
 
 export default function TopNav({ navigation }: StackHeaderProps) {
   const t = useTheme();
   const currentRoute = useRoute();
+  const { user } = useAuth(); // NEW
+  const signedIn = !!user; // NEW
 
   const tabs = [
+    { label: 'Test', route: 'ApiTest'},
+    { label: 'Welcome', route: 'Welcome' },
     { label: 'Home', route: 'Home' },
     { label: 'Calendar', route: 'Calendar' },
+    { label: 'Notifications', route: 'Notifications' }, // placeholder
     { label: 'Events', route: 'Events' },
     { label: 'Friends', route: 'Friends' },
-    { label: 'Auth', route: 'Auth' }, // placeholder
-    { label: 'Notifications', route: 'Notifications' }, // placeholder
-    { label: 'Account', route: 'AccountCreation' },
     { label: 'Settings', route: 'Settings' }, // placeholder
+  ];
+
+  const tabsignedout = [
+    { label: 'Sign in', route: 'Auth' }, // placeholder
+    { label: 'Create Account', route: 'AccountCreation' },
   ];
 
   return (
@@ -36,30 +48,72 @@ export default function TopNav({ navigation }: StackHeaderProps) {
         FriendSync
       </Text>
 
-      <View style={{ flexDirection: 'row', columnGap: t.space.lg }}>
-        {tabs.map((tab) => {
-          const active = currentRoute.name === tab.route;
-          return (
-            <Pressable
-              key={tab.route}
-              onPress={() => navigation.navigate(tab.route as never)}
-              style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
-            >
-              <Text
+      {/*
+        Choose which set of tabs to render based on auth state.
+        Replace the `signedIn` assignment with your real auth hook/context, e.g.
+        const { user } = useAuth(); const signedIn = !!user;
+      */}
+      {(() => {
+        //const signedIn = true; // TODO: replace with real auth check
+        //currently just choose true or false depending on what you want to see/test
+        const menu = signedIn ? tabs : tabsignedout;
+
+        return (
+          <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: t.space.lg }}>
+            {/* NEW: display user's email or name if signed in */}
+            {signedIn && (
+              <Text style={{ color: t.color.textMuted, fontSize: 12 }}>
+                {user?.displayName || user?.email}
+              </Text>
+            )}
+
+            {/* Existing tab links */}
+            {menu.map((tab) => {
+              const active = currentRoute.name === tab.route;
+              return (
+                <Pressable
+                  key={tab.route}
+                  onPress={() => navigation.navigate(tab.route as never)}
+                  style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                >
+                  <Text
+                    style={{
+                      color: active ? '#fff' : t.color.text,
+                      fontWeight: active ? '700' : '500',
+                      borderBottomWidth: active ? 2 : 0,
+                      borderBottomColor: active ? t.color.accent : 'transparent',
+                      paddingBottom: 4,
+                    }}
+                  >
+                    {tab.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+
+            {/* jUSTIN: Sign Out button when signed in */}
+            {signedIn && (
+              <TouchableOpacity
+                onPress={() => {
+                  auth.signOut();
+                  console.log('[Auth] User signed out');
+                }}
+                activeOpacity={0.7}
                 style={{
-                  color: active ? '#fff' : t.color.text,
-                  fontWeight: active ? '700' : '500',
-                  borderBottomWidth: active ? 2 : 0,
-                  borderBottomColor: active ? t.color.accent : 'transparent',
-                  paddingBottom: 4,
+                  backgroundColor: '#b91c1c',
+                  paddingVertical: 6,
+                  paddingHorizontal: 12,
+                  borderRadius: 8,
                 }}
               >
-                {tab.label}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+                <Text style={{ color: '#fff', fontWeight: '600', fontSize: 14 }}>
+                  Sign Out
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        );
+      })()}
     </View>
   );
 }

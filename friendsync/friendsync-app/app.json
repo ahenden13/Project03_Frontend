@@ -30,6 +30,13 @@
       "ios",
       "android",
       "web"
+    ],
+    "scheme": "friendsync",
+    "extra": {
+      "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "1013334906995-8mbvl4rhu9jh4haool5jpup9qng9q7ph.apps.googleusercontent.com"
+    },
+    "plugins": [
+      "expo-web-browser"
     ]
   }
 }

@@ -6,6 +6,10 @@ import Screen from '../components/ScreenTmp';
 import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
 
+// added 
+import { auth } from "../lib/firebase";
+import { useAuth } from "../features/auth/AuthProvider";
+
 
 /* 
 IMPORTANT NOTE (from alana): 
@@ -67,7 +71,7 @@ export default function SettingsScreen() {
 
   // Style for availability blocks (blue, like HomeScreen)
   const eventCellStyle = {
-    backgroundColor: '#3A8DFF',
+    backgroundColor: t.color.accent,
   };
 
   // Default scroll position to start near morning hours
@@ -135,6 +139,28 @@ export default function SettingsScreen() {
           }}
           hourStyle={{ color: t.color.textMuted }}
         />
+      </View>
+      {/* --- Sign Out Section --- */}
+      <View style={{ marginTop: 32, alignItems: "center" }}>
+        <Text style={{ color: t.color.textMuted, marginBottom: 8 }}>
+          Signed in as {useAuth().user?.email}
+        </Text>
+
+        <TouchableOpacity
+          onPress={() => {
+            auth.signOut();
+            console.log("[Auth] User signed out");
+          }}
+          activeOpacity={0.7}
+          style={{
+            backgroundColor: "#b91c1c",
+            paddingVertical: 10,
+            paddingHorizontal: 20,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Sign Out</Text>
+        </TouchableOpacity>
       </View>
     </Screen>
   );

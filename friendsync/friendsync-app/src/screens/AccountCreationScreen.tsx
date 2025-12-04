@@ -10,9 +10,6 @@ export default function AccountCreationScreen() {
       <Text style={{ color: t.color.text, fontSize: t.font.h1, fontWeight: '600' }}>
         Account Creation (placeholder)
       </Text>
-      <Text style={{ color: t.color.textMuted, marginTop: t.space.sm }}>
-        OAuth hooks in Week 2.
-      </Text>
     </Screen>
   );
 }
