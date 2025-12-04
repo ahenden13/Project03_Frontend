@@ -1,7 +1,8 @@
 // src/screens/HomeScreen.tsx
 
 import React, { useMemo, useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, Modal, StyleSheet, ScrollView, Button } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, StyleSheet, ScrollView, Button, Pressable } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import Screen from '../components/ScreenTmp';
 import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
@@ -146,15 +147,33 @@ export default function HomeScreen() {
   // --- Modal state for event details ---
   const [selectedEvent, setSelectedEvent] = useState<any | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [ownerName, setOwnerName] = useState<string | null>(null);
 
-  function openEventModal(ev: any) {
+  async function openEventModal(ev: any) {
     setSelectedEvent(ev);
     setModalVisible(true);
+    try {
+      const ownerId = ev?.raw?.userId;
+      if (ownerId != null) {
+        const u = await db.getUserById(Number(ownerId));
+        if (u && u.username) setOwnerName(u.username);
+        else setOwnerName(String(ownerId));
+      } else {
+        setOwnerName(null);
+      }
+    } catch (e) {
+      // fallback to numeric id if lookup fails
+      // eslint-disable-next-line no-console
+      console.warn('HomeScreen: failed to resolve owner name', e);
+      const ownerId = ev?.raw?.userId;
+      setOwnerName(ownerId != null ? String(ownerId) : null);
+    }
   }
 
   function closeEventModal() {
     setSelectedEvent(null);
     setModalVisible(false);
+    setOwnerName(null);
   }
 
   return (
@@ -251,7 +270,10 @@ export default function HomeScreen() {
       {/* --- Event Details Modal --- */}
       <Modal visible={modalVisible} animationType="slide" transparent={true} onRequestClose={closeEventModal}>
         <View style={styles.modalBackdrop}>
-          <View style={[styles.modalCard, { backgroundColor: t.color.surface || '#fff' }]}>
+          <View style={[styles.modalCard, { backgroundColor: t.color.surface || '#fff', position: 'relative' }]}>
+            <Pressable onPress={closeEventModal} accessibilityLabel="Close event details" style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 20 }}>
+              <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+            </Pressable>
             <ScrollView>
               <Text style={[styles.modalTitle, { color: t.color.text }]}>{selectedEvent?.title ?? 'Event'}</Text>
               <Text style={{ color: t.color.textMuted, marginBottom: 8 }}>
@@ -265,13 +287,9 @@ export default function HomeScreen() {
               {selectedEvent?.raw?.userId != null && (
                 <>
                   <Text style={{ color: t.color.textMuted, fontWeight: '600', marginBottom: 6 }}>Owner</Text>
-                  <Text style={{ color: t.color.text, marginBottom: 12 }}>{String(selectedEvent.raw.userId)}</Text>
+                  <Text style={{ color: t.color.text, marginBottom: 12 }}>{ownerName ?? String(selectedEvent.raw.userId)}</Text>
                 </>
               )}
-
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-                <Button title="Close" onPress={closeEventModal} />
-              </View>
             </ScrollView>
           </View>
         </View>

@@ -1,4 +1,5 @@
 import { Modal, View, Text, Pressable } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '../lib/ThemeProvider';
 
 // refer to this for details on props
@@ -31,28 +32,15 @@ export default function DetailModal({ visible, title, body, onClose }: Props) {
             padding: t.space.lg,
             borderWidth: 1,
             borderColor: t.color.border,
+            position: 'relative',
           }}
         >
+          <Pressable onPress={onClose} accessibilityLabel="Close details" style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 20 }}>
+            <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+          </Pressable>
+
           <Text style={{ color: '#fff', fontSize: 20, fontWeight: '700' }}>{title}</Text>
           {!!body && <Text style={{ color: t.color.text, marginTop: t.space.sm }}>{body}</Text>}
-
-          <View style={{ marginTop: t.space.lg, alignItems: 'flex-end' }}>
-            <Pressable
-              onPress={onClose}
-              accessibilityRole="button"
-              accessibilityLabel="Close details"
-              style={({ pressed }) => ({
-                paddingVertical: 10,
-                paddingHorizontal: 16,
-                borderRadius: t.radius.md,
-                backgroundColor: pressed ? t.color.surfaceAlt : t.color.surface,
-                borderWidth: 1,
-                borderColor: t.color.border,
-              })}
-            >
-              <Text style={{ color: '#fff', fontWeight: '600' }}>Close</Text>
-            </Pressable>
-          </View>
         </View>
       </View>
     </Modal>

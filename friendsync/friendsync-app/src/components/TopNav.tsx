@@ -20,7 +20,7 @@ export default function TopNav({ navigation }: StackHeaderProps) {
     { label: 'Home', route: 'Home' },
     { label: 'Calendar', route: 'Calendar' },
     { label: 'Notifications', route: 'Notifications' }, // placeholder
-    { label: 'My Events', route: 'Events' },
+    { label: 'Events', route: 'Events' },
     { label: 'Friends', route: 'Friends' },
     { label: 'Settings', route: 'Settings' }, // placeholder
   ];
