@@ -82,8 +82,11 @@ export default function FriendsScreen() {
       const all = await db.getAllUsers();
       const accepted = currentUserId ? await db.getFriendsForUser(currentUserId) : [];
       const acceptedSet = new Set((accepted || []).map((x: number) => Number(x)));
+      // Also exclude the currently signed-in user by email as a safety
+      // in case `currentUserId` has not been resolved yet.
+      const storedEmail = (await AsyncStorage.getItem('userEmail'))?.toLowerCase() ?? null;
       const filtered = (all || [])
-        .filter((u: any) => u.userId !== currentUserId && !acceptedSet.has(u.userId))
+        .filter((u: any) => u.userId !== currentUserId && !acceptedSet.has(u.userId) && (storedEmail == null || String(u.email || '').toLowerCase() !== storedEmail))
         .map((u: any) => ({ id: u.userId, username: u.username ?? u.email ?? `user${u.userId}`, email: u.email }));
       setCandidates(filtered);
     } catch (e) {
