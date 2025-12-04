@@ -49,7 +49,7 @@ export async function syncFromBackend(userId: number): Promise<void> {
     const userIdParam = String(userId);
 
     // Fetch all data from backend
-    const [users, events, friends, rsvps, notifications, preferences] = await Promise.all([
+    const [allUsers, events, friends, rsvps, notifications, preferences] = await Promise.all([
       fetchFromBackend(`/api/users`).catch(() => null),
       fetchFromBackend(`/api/events/user/${userIdParam}`).catch(() => []),
       fetchFromBackend(`/api/friends/user/${userIdParam}`).catch(() => []),
