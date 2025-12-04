@@ -1,7 +1,8 @@
 // src/screens/CalendarScreen.tsx
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions, ScrollView, Modal, TextInput, Button } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, ScrollView, Modal, TextInput, Button, Pressable } from "react-native";
+import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Calendar } from "react-native-calendars"; // Calendar library
@@ -26,7 +27,7 @@ export default function CalendarScreen() {
   const [showMine, setShowMine] = useState(true); // My availability
   const [showFriends, setShowFriends] = useState(true); // Friends' availability
   const [showMyEvents, setShowMyEvents] = useState(true); // My events
-  const [showInvitedEvents, setShowInvitedEvents] = useState(true); // Events I'm invited to
+  // invited events toggle removed per request
 
   // ---------------------------
   // UI & data state (top-level)
@@ -39,7 +40,7 @@ export default function CalendarScreen() {
   const [myAvailability, setMyAvailability] = useState<any[]>([]);
   const [friendAvailability, setFriendAvailability] = useState<any[]>([]);
   const [myEvents, setMyEvents] = useState<any[]>([]);
-  const [invitedEvents, setInvitedEvents] = useState<any[]>([]);
+  // invitedEvents removed
   const [loadingData, setLoadingData] = useState<boolean>(false);
 
   // initial data arrays are empty and will be populated from db
@@ -54,33 +55,27 @@ export default function CalendarScreen() {
   const dataByDate = useMemo(() => {
     const map: Record<string, any[]> = {};
 
-    if (showMine) {
-      myAvailability.forEach((item) => {
-        if (!map[item.date]) map[item.date] = [];
-        map[item.date].push({ ...item, type: "mine" });
-      });
-    }
-
-    if (showFriends) {
-      friendAvailability.forEach((item) => {
-        if (!map[item.date]) map[item.date] = [];
-        map[item.date].push({ ...item, type: "friend" });
-      });
-    }
-
+    // Add my events (if enabled)
     if (showMyEvents) {
       myEvents.forEach((item) => {
         if (!map[item.date]) map[item.date] = [];
-        map[item.date].push({ ...item, type: "myEvent" });
+        map[item.date].push(item);
       });
     }
 
-    if (showInvitedEvents) {
-      invitedEvents.forEach((item) => {
-        const d = item.date || (item.startTime ? new Date(item.startTime).toISOString().slice(0, 10) : null);
-        if (!d) return;
-        if (!map[d]) map[d] = [];
-        map[d].push({ ...item, type: "invitedEvent" });
+    // Add my availability/free time (if enabled)
+    if (showMine) {
+      myAvailability.forEach((item) => {
+        if (!map[item.date]) map[item.date] = [];
+        map[item.date].push(item);
+      });
+    }
+
+    // Add friends' events/free time (if enabled)
+    if (showFriends) {
+      friendAvailability.forEach((item) => {
+        if (!map[item.date]) map[item.date] = [];
+        map[item.date].push(item);
       });
     }
 
@@ -89,11 +84,9 @@ export default function CalendarScreen() {
     showMine,
     showFriends,
     showMyEvents,
-    showInvitedEvents,
     myAvailability,
     friendAvailability,
     myEvents,
-    invitedEvents,
     currentUserId,
   ]);
 
@@ -155,6 +148,31 @@ export default function CalendarScreen() {
   // on narrower viewports and to improve tap targets on touch devices.
   const MIN_DAY_CELL_HEIGHT = 56; // px (previously 32)
 
+  // Pill sizing constants used by the day renderer to estimate how many
+  // event 'pills' will fit vertically inside a day cell. These are also
+  // used to compute a required minimum cell height to ensure at least
+  // two pill slots (including a +N more slot) are available.
+  // Size of the today badge (rendered for the current day). We account
+  // for this explicitly when computing vertical space so it doesn't overlap
+  // the event pills.
+  const TODAY_BADGE_SIZE = 22;
+  // Reserve exactly the badge size for spacing between the day label
+  // and the first pill row so non-today cells reserve the same vertical
+  // space as the today badge.
+  const DAY_NUMBER_SPACE = TODAY_BADGE_SIZE;
+  // Visual height of a pill row (includes padding inside the pill)
+  // Reduced slightly to account for the added 1px border on top/bottom.
+  const PILL_VISUAL_HEIGHT = 14;
+  // Vertical spacing between pills (used in layout math and applied as
+  // marginBottom on each pill element). Set to 0 so pills render flush.
+  const PILL_MARGIN = 0;
+  // Extra buffer (px) to conservatively account for border thickness,
+  // line-height and any platform rendering differences so our math does
+  // not underestimate the rendered pill height and cause overflow.
+  const PILL_RENDER_BUFFER = 4;
+  const CELL_INNER_PADDING = 4; // inner padding used in render calculation
+  const PILL_MIN_SLOTS = 2; // ensure at least this many pill slots
+
   // Compute per-day width but respect a minimum size so content remains legible
   const dayCellWidth = Math.max(MIN_DAY_CELL_WIDTH, Math.floor((rawWidth - 8) / 7));
 
@@ -198,6 +216,10 @@ export default function CalendarScreen() {
     // remove the lower minimum clamp; allow cells to shrink to fit rows
     // still cap to a reasonable max based on width and keep at least 1px to avoid zero-height
     computedDayHeight = Math.max(MIN_DAY_CELL_HEIGHT, Math.min(fitHeight || Math.floor(dayCellWidth * 1.0), Math.floor(dayCellWidth * 1.0)));
+    // Ensure the computed cell height can accommodate at least PILL_MIN_SLOTS pills
+    const perItem = PILL_VISUAL_HEIGHT + PILL_MARGIN + PILL_RENDER_BUFFER;
+    const requiredMinForPills = DAY_NUMBER_SPACE + CELL_INNER_PADDING + (perItem * PILL_MIN_SLOTS);
+    if (computedDayHeight < requiredMinForPills) computedDayHeight = requiredMinForPills;
   }
   let dayCellHeight = computedDayHeight;
   const [calendarContainerHeight, setCalendarContainerHeight] = useState<number | null>(null);
@@ -229,13 +251,9 @@ export default function CalendarScreen() {
   const renderDay = ({ date, state }: any) => {
     const entries = dataByDate[date.dateString] || [];
     // Visual metrics used to estimate fit (conservative)
-    const DAY_NUMBER_SPACE = 16;
-    const PILL_VISUAL_HEIGHT = 16;
-    const PILL_MARGIN = 2;
-    const innerPadding = 4;
-
-    const availableForPills = Math.max(0, dayCellHeight - DAY_NUMBER_SPACE - innerPadding);
-    const perItem = PILL_VISUAL_HEIGHT + PILL_MARGIN;
+    // (constants defined at top so sizing decisions are consistent)
+    const availableForPills = Math.max(0, dayCellHeight - DAY_NUMBER_SPACE - CELL_INNER_PADDING);
+    const perItem = PILL_VISUAL_HEIGHT + PILL_MARGIN + PILL_RENDER_BUFFER;
     let maxPills = Math.floor(availableForPills / perItem);
     if (!Number.isFinite(maxPills) || maxPills < 0) maxPills = 0;
 
@@ -245,7 +263,6 @@ export default function CalendarScreen() {
     const isToday = date && date.dateString === todayKey;
 
     // If nothing fits vertically, show a compact count indicator
-    const TODAY_BADGE_SIZE = 22;
     if (maxPills === 0) {
       return (
         <View
@@ -293,85 +310,57 @@ export default function CalendarScreen() {
     let showMoreAsPill = false;
     let moreCount = 0;
 
-    if (!willOverflow) {
-      visible = entries.slice(0, maxPills);
-    } else {
-      if (maxPills === 1) {
-        // Only space for one slot: render a single '+N more' pill
-        visible = [];
-        showMoreAsPill = true;
-        moreCount = entries.length;
-      } else {
-        // Use last slot for '+N more'
-        visible = entries.slice(0, maxPills - 1);
-        showMoreAsPill = true;
-        moreCount = entries.length - visible.length;
-      }
-    }
-
-    const openEventModal = (entry: any) => {
-      setModalPayload(entry);
-      setModalType('event');
-    };
-
-    const openListModal = (dateString: string, entriesForDay: any[]) => {
-      setModalPayload({ date: dateString, entries: entriesForDay });
-      setModalType('list');
-    };
-
-    const openCreateModal = (dateString: string) => {
-      setModalPayload({ date: dateString });
+    const openCreateModal = (dateStr: string) => {
       setModalType('create');
+      setModalPayload({ date: dateStr });
     };
 
-    const renderPill = (entry: any, idx: number) => {
-      let bg = "#3A8DFF";
-      if (entry.type === "friend") bg = "#34C759";
-      if (entry.type === "myEvent") bg = "#FF3B30";
-      if (entry.type === "invitedEvent") bg = "#AF52DE";
-      const contrastText = (hex: string) => {
-        try {
-          const c = hex.replace('#', '');
-          const r = parseInt(c.substring(0,2),16);
-          const g = parseInt(c.substring(2,4),16);
-          const b = parseInt(c.substring(4,6),16);
-          const l = (0.299*r + 0.587*g + 0.114*b)/255;
-          return l > 0.6 ? '#000000' : '#ffffff';
-        } catch { return '#ffffff'; }
+    const renderPill = (it: any, idx: number) => {
+      const colorForEntry = (owner?: string, kind?: string) => {
+        if (!owner && !kind) return { bg: t.color.accent, border: '#1f74e6' };
+        if (owner === 'friend' && kind === 'event') return { bg: '#AF52DE', border: '#8b32c6' };
+        if (owner === 'friend' && kind === 'free') return { bg: '#34C759', border: '#2f9e4a' };
+        if (owner === 'mine' && kind === 'event') return { bg: '#FF3B30', border: '#d12a24' };
+        if (owner === 'mine' && kind === 'free') return { bg: t.color.accent, border: '#1f74e6' };
+        return { bg: t.color.accent, border: '#1f74e6' };
       };
-      const label =
-        entry.type === "myEvent"
-          ? `${entry.time} ${entry.title}`
-          : entry.type === "invitedEvent"
-          ? `${entry.time} ${entry.title}`
-          : entry.type === "friend"
-          ? `${entry.name}: ${entry.time}`
-          : entry.time;
-
+      const { bg, border } = colorForEntry(it.owner, it.kind);
       return (
-        <TouchableOpacity key={`p-${idx}`} onPress={() => openEventModal(entry)} style={{ marginBottom: 1, maxWidth: dayCellWidth - 6 }}>
-          <View style={{ backgroundColor: bg, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 5 }}>
-            <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: contrastText(bg), fontSize: 9 }}>
-              {label}
-            </Text>
+        <TouchableOpacity key={String(idx)} activeOpacity={0.85} onPress={() => { setModalPayload(it); setModalType('event'); }} style={{ marginBottom: PILL_MARGIN }}>
+          <View style={{ backgroundColor: bg, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 12, width: '100%', borderWidth: 1, borderColor: border }}>
+            <Text numberOfLines={1} ellipsizeMode='tail' style={{ color: '#fff', fontSize: 10 }}>{it.title ?? it.eventTitle ?? ''}</Text>
+          </View>
+        </TouchableOpacity>
+      );
+    };
+    const renderMorePill = (count: number, dateStr: string) => {
+      return (
+        <TouchableOpacity key={'more-'+dateStr} onPress={() => { setModalType('list'); setModalPayload({ date: dateStr, entries: entries }); }} style={{ marginBottom: PILL_MARGIN }}>
+          <View style={{ backgroundColor: '#444', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 12, width: '100%', borderWidth: 1, borderColor: '#333' }}>
+            <Text numberOfLines={1} ellipsizeMode='tail' style={{ color: '#fff', fontSize: 10 }}>+{count} more</Text>
           </View>
         </TouchableOpacity>
       );
     };
 
-    const renderMorePill = (count: number, dateStr?: string) => (
-      <TouchableOpacity key="more-pill" onPress={() => dateStr && openListModal(dateStr, dataByDate[dateStr] || [])} style={{ marginBottom: 1, maxWidth: dayCellWidth - 6 }}>
-        <View style={{ backgroundColor: '#888', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 5 }}>
-          <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: '#fff', fontSize: 9 }}>
-            +{count} more
-          </Text>
-        </View>
-      </TouchableOpacity>
-    );
+    if (!willOverflow) {
+      visible = entries.slice(0, maxPills);
+    } else {
+      if (maxPills === 1) {
+        // Only space for a single visible slot: show a '+N more' indicator
+        visible = [];
+        showMoreAsPill = true;
+        moreCount = entries.length;
+      } else {
+        // Reserve the last slot for the '+N more' pill
+        visible = entries.slice(0, Math.max(0, maxPills - 1));
+        showMoreAsPill = true;
+        moreCount = Math.max(0, entries.length - visible.length);
+      }
+    }
 
     return (
-      <TouchableOpacity
-        onPress={() => { if ((dataByDate[date.dateString] || []).length === 0) openCreateModal(date.dateString); }}
+      <View
         style={{
           width: dayCellWidth,
           height: dayCellHeight,
@@ -383,25 +372,27 @@ export default function CalendarScreen() {
         }}
       >
         {isToday ? (
-          <View style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
+          <Pressable onPress={() => { if ((dataByDate[date.dateString] || []).length === 0) openCreateModal(date.dateString); }} style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, borderRadius: TODAY_BADGE_SIZE/2, backgroundColor: t.color.accent, alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ color: '#fff', fontWeight: '700', fontSize: 11 }}>{date.day}</Text>
-          </View>
+          </Pressable>
         ) : (
-          <Text
-            style={{
-              color: state === "disabled" ? t.color.textMuted : t.color.text,
-              fontWeight: "600",
-              fontSize: 11,
-              marginBottom: 1,
-            }}
-          >
-            {date.day}
-          </Text>
+          <Pressable onPress={() => { if ((dataByDate[date.dateString] || []).length === 0) openCreateModal(date.dateString); }} style={{ width: TODAY_BADGE_SIZE, height: TODAY_BADGE_SIZE, alignItems: 'center', justifyContent: 'center' }}>
+            <Text
+              style={{
+                color: state === "disabled" ? t.color.textMuted : t.color.text,
+                fontWeight: "600",
+                fontSize: 11,
+                marginBottom: 1,
+              }}
+            >
+              {date.day}
+            </Text>
+          </Pressable>
         )}
 
         {visible.map(renderPill)}
         {showMoreAsPill && renderMorePill(moreCount, date.dateString)}
-      </TouchableOpacity>
+      </View>
     );
   };
 
@@ -425,7 +416,7 @@ export default function CalendarScreen() {
       setMyEvents([]);
       setMyAvailability([]);
       setFriendAvailability([]);
-      setInvitedEvents([]);
+      // invitedEvents removed
       if (mountedRef.current) setLoadingData(false);
       return;
     }
@@ -446,18 +437,7 @@ export default function CalendarScreen() {
         (fFree || []).forEach((slot: any) => friendEntries.push({ ...slot, name }));
       }));
 
-      // invited events via RSVPs
-      const rsvps = await db.getRsvpsForUser(currentUserId);
-      const invited: any[] = [];
-      await Promise.all((rsvps || []).map(async (r: any) => {
-        try {
-          const ownerEvents = await db.getEventsForUser(r.eventOwnerId);
-          const ev = (ownerEvents || []).find((e: any) => (e.eventId ?? e.eventId) === r.eventId || e.eventId === r.eventId);
-          if (ev) invited.push({ ...ev, rsvpStatus: r.status });
-        } catch (e) {
-          // ignore per-item errors
-        }
-      }));
+      // invited events via RSVPs removed per request
 
       if (!mountedRef.current) return;
 
@@ -485,7 +465,8 @@ export default function CalendarScreen() {
         date: e.date ? (typeof e.date === 'string' ? (e.date.length >= 10 ? e.date.slice(0, 10) : e.date) : normalizeDate(e.date)) : normalizeDate(e.startTime),
         time: e.startTime ? fmtTime(e.startTime) : '',
         title: e.eventTitle ?? e.title ?? e.description ?? 'Event',
-        type: 'myEvent',
+        owner: 'mine',
+        kind: (e.isEvent === 0 || e.isEvent === false) ? 'free' : 'event',
       })).filter((x: any) => !!x.date);
 
       const normalizedMyFree = (myFt || []).map((f: any) => ({
@@ -493,40 +474,33 @@ export default function CalendarScreen() {
         date: normalizeDate(f.startTime),
         time: fmtTime(f.startTime),
         title: f.eventTitle ?? f.title ?? 'Free',
-        type: 'mine',
+        owner: 'mine',
+        kind: 'free',
       })).filter((x: any) => !!x.date);
 
       const normalizedFriends = friendEntries.map((f: any) => ({
         ...f,
         date: f.date ? (typeof f.date === 'string' && f.date.length >= 10 ? f.date.slice(0, 10) : normalizeDate(f.date)) : normalizeDate(f.startTime),
         time: f.startTime ? fmtTime(f.startTime) : f.time ?? '',
-        title: f.eventTitle ?? f.title ?? f.name ?? 'Free',
-        type: 'friend',
+        title: f.eventTitle ?? f.title ?? f.name ?? 'Event',
+        owner: 'friend',
+        kind: (f.isEvent === 0 || f.isEvent === false) ? 'free' : 'event',
       })).filter((x: any) => !!x.date);
 
-      const normalizedInvited = invited.map((e: any) => ({
-        ...e,
-        date: e.date ? (typeof e.date === 'string' ? (e.date.length >= 10 ? e.date.slice(0, 10) : e.date) : normalizeDate(e.date)) : normalizeDate(e.startTime),
-        time: e.startTime ? fmtTime(e.startTime) : '',
-        title: e.eventTitle ?? e.title ?? e.description ?? 'Invited',
-        type: 'invitedEvent',
-      })).filter((x: any) => !!x.date);
-
-  // Update state if still mounted
-  setMyEvents(normalizedMyEvents);
-  setMyAvailability(normalizedMyFree);
-  setFriendAvailability(normalizedFriends);
-  setInvitedEvents(normalizedInvited);
+      // Update state if still mounted
+      setMyEvents(normalizedMyEvents);
+      setMyAvailability(normalizedMyFree);
+      setFriendAvailability(normalizedFriends);
   // Debug: summary of loaded counts (commented out by request)
   // eslint-disable-next-line no-console
-  // console.log('Calendar: loadData result', { myEvents: normalizedMyEvents.length, myFree: normalizedMyFree.length, friends: normalizedFriends.length, invited: normalizedInvited.length });
+  // console.log('Calendar: loadData result', { myEvents: normalizedMyEvents.length, myFree: normalizedMyFree.length, friends: normalizedFriends.length });
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('Calendar load failed', e);
     } finally {
       if (mountedRef.current) setLoadingData(false);
     }
-  }, [currentUserId, showMine, showFriends, showMyEvents, showInvitedEvents]);
+  }, [currentUserId, showMine, showFriends, showMyEvents]);
 
   // Call loadData on mount and when dependencies change
   useEffect(() => {
@@ -604,7 +578,10 @@ export default function CalendarScreen() {
     return (
       <Modal visible={true} transparent animationType="slide" onRequestClose={closeModal}>
         <View style={{ flex: 1, backgroundColor: '#00000066', justifyContent: 'center', padding: 20 }}>
-          <View style={{ backgroundColor: t.color.surface, padding: 16, borderRadius: 8 }}>
+          <View style={{ backgroundColor: t.color.surface, padding: 16, borderRadius: 8, position: 'relative' }}>
+            <Pressable onPress={closeModal} accessibilityLabel="Close event details" style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 20 }}>
+              <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+            </Pressable>
             <Text style={{ fontSize: 18, fontWeight: '700', color: t.color.text }}>{e.title ?? e.eventTitle ?? 'Event'}</Text>
             <Text style={{ color: t.color.textMuted, marginTop: 8 }}>{e.time ?? ''}</Text>
             {e.date ? <Text style={{ marginTop: 6, color: t.color.textMuted }}>Date: {String(e.date)}</Text> : null}
@@ -624,17 +601,6 @@ export default function CalendarScreen() {
             ) : null}
 
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 }}>
-              <Button title="Close" onPress={() => {
-                // If this detail was opened from a list, return to that list; otherwise close
-                if (e && (e as any)._returnTo) {
-                  const ret = (e as any)._returnTo;
-                  setModalType(ret.type as any);
-                  setModalPayload(ret.payload);
-                } else {
-                  closeModal();
-                }
-              }} />
-              {e.eventId ? <View style={{ width: 8 }} /> : null}
               {e.eventId ? <Button title="Delete" color="#d9534f" onPress={async () => {
                 try {
                   await db.deleteEvent(e.eventId);
@@ -674,11 +640,22 @@ export default function CalendarScreen() {
     return (
       <Modal visible={true} transparent animationType="slide" onRequestClose={closeModal}>
         <View style={{ flex: 1, backgroundColor: '#00000066', justifyContent: 'center', padding: 12 }}>
-          <View style={{ backgroundColor: t.color.surface, maxHeight: '80%', borderRadius: 8, padding: 12 }}>
+          <View style={{ backgroundColor: t.color.surface, maxHeight: '80%', borderRadius: 8, padding: 12, position: 'relative' }}>
+            <Pressable onPress={closeModal} accessibilityLabel="Close list" style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 20 }}>
+              <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+            </Pressable>
             <Text style={{ fontSize: 18, fontWeight: '700', color: t.color.text }}>Items on {date}</Text>
               <ScrollView style={{ marginTop: 8 }}>
               {entries.map((it: any, i: number) => {
-                const bg = it.type === 'friend' ? '#34C759' : it.type === 'myEvent' ? '#FF3B30' : it.type === 'invitedEvent' ? '#AF52DE' : '#3A8DFF';
+                const colorForEntry = (owner?: string, kind?: string) => {
+                  if (!owner && !kind) return t.color.accent;
+                  if (owner === 'friend' && kind === 'event') return '#AF52DE';
+                  if (owner === 'friend' && kind === 'free') return '#34C759';
+                  if (owner === 'mine' && kind === 'event') return '#FF3B30';
+                  if (owner === 'mine' && kind === 'free') return t.color.accent;
+                  return t.color.accent;
+                };
+                const bg = colorForEntry(it.owner, it.kind);
                 return (
                   <TouchableOpacity
                     key={i}
@@ -695,9 +672,6 @@ export default function CalendarScreen() {
                 );
               })}
             </ScrollView>
-            <View style={{ marginTop: 8, alignItems: 'flex-end' }}>
-              <Button title="Close" onPress={closeModal} />
-            </View>
           </View>
         </View>
       </Modal>
@@ -822,7 +796,10 @@ export default function CalendarScreen() {
       <Modal visible={true} transparent animationType="slide" onRequestClose={closeModal}>
         <View style={{ flex: 1, backgroundColor: '#00000088', justifyContent: 'center', padding: 12 }}>
           <View style={{ backgroundColor: t.color.surface, borderRadius: 10, overflow: 'hidden', maxHeight: '90%' }}>
-            <View style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee' }}>
+            <View style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee', position: 'relative' }}>
+              <Pressable onPress={closeModal} accessibilityLabel="Close create dialog" style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 20 }}>
+                <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+              </Pressable>
               <Text style={{ fontSize: 18, fontWeight: '700', color: t.color.text }}>{modalPayload?.editMode ? 'Edit' : 'Create'} on {date}</Text>
             </View>
             <ScrollView contentContainerStyle={{ padding: 14 }}>
@@ -934,9 +911,6 @@ export default function CalendarScreen() {
             </ScrollView>
 
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', padding: 12, borderTopWidth: 1, borderTopColor: '#eee' }}>
-              <TouchableOpacity onPress={closeModal} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: '#e6e6e6', borderRadius: 8, marginRight: 8 }}>
-                <Text style={{ color: '#000' }}>Cancel</Text>
-              </TouchableOpacity>
               <TouchableOpacity onPress={save} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: t.color.accent, borderRadius: 8 }}>
                 <Text style={{ color: '#fff' }}>Save</Text>
               </TouchableOpacity>
@@ -1092,22 +1066,7 @@ export default function CalendarScreen() {
           </Text>
         </TouchableOpacity>
 
-        {/* Toggle Invited Events */}
-        <TouchableOpacity
-          onPress={() => setShowInvitedEvents(!showInvitedEvents)}
-          style={{
-            marginRight: 10,
-            paddingVertical: 6,
-            paddingHorizontal: 10,
-            borderRadius: 8,
-          }}
-        >
-          <Text
-            style={{ color: showInvitedEvents ? "#AF52DE" : t.color.textMuted }}
-          >
-            Invited Events
-          </Text>
-        </TouchableOpacity>
+        {/* Invited Events toggle removed */}
 
       </View>
   {/* spacer removed per request (programmatic scroll + padding remain) */}

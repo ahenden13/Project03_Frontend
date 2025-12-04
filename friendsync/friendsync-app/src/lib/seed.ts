@@ -137,38 +137,83 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
   }
 
   // Create (or ensure) example users
-  const alice = await ensureUser('alice', 'alice@example.com');
-  const bob = await ensureUser('bob', 'bob@example.com');
-  const carol = await ensureUser('carol', 'carol@example.com');
+  // If a signed-in local user was detected, make them the primary seeded user
+  // and create two friends for them so the seeded data is centered around
+  // the currently signed-in developer. Otherwise fall back to alice/bob/carol.
+  let alice: number;
+  let bob: number;
+  let carol: number;
 
-  // If we detected a signed-in user, prefer them as the first created user for deterministic seeding
   if (primaryUserId) {
-    const idx = createdUsers.findIndex(u => u.id === primaryUserId);
-    if (idx > 0) {
-      const [u] = createdUsers.splice(idx, 1);
-      createdUsers.unshift(u);
+    // Ensure primary user is present in createdUsers (detection earlier may have added them)
+    const prim = await db.getUserById(primaryUserId);
+    if (prim && prim.userId) {
+      if (!createdUsers.find(u => u.id === prim.userId)) createdUsers.push({ id: prim.userId, username: prim.username || `user${prim.userId}` });
+      // ensure primary is first
+      const idx = createdUsers.findIndex(u => u.id === prim.userId);
+      if (idx > 0) {
+        const [u] = createdUsers.splice(idx, 1);
+        createdUsers.unshift(u);
+      }
+      alice = prim.userId;
+    } else {
+      // fallback: create a user from stored email/name
+      const uname = signedInEmail ? signedInEmail.split('@')[0] : `devuser${Date.now()}`;
+      const nid = await db.createUser({ username: uname, email: signedInEmail ?? `${uname}@example.com` });
+      createdUsers.push({ id: nid, username: uname });
+      alice = nid;
+      // ensure primary set
+      primaryUserId = nid;
     }
+
+    // create two friend users for the primary user
+    bob = await ensureUser('friend_bob', `friend_bob+${alice}@example.com`);
+    carol = await ensureUser('friend_carol', `friend_carol+${alice}@example.com`);
+
+    // make them friends with primary
+    const fr1 = await db.sendFriendRequest(alice, bob);
+    await db.respondFriendRequest(fr1, true);
+    createdFriends.push({ rowId: fr1, a: alice, b: bob });
+
+    const fr2 = await db.sendFriendRequest(alice, carol);
+    await db.respondFriendRequest(fr2, true);
+    createdFriends.push({ rowId: fr2, a: alice, b: carol });
+  } else {
+    // legacy deterministic seed when no signed-in user present
+    alice = await ensureUser('alice', 'alice@example.com');
+    bob = await ensureUser('bob', 'bob@example.com');
+    carol = await ensureUser('carol', 'carol@example.com');
+
+    // If we detected a signed-in user earlier, prefer them as the first created user for deterministic seeding
+    if (primaryUserId) {
+      const idx = createdUsers.findIndex(u => u.id === primaryUserId);
+      if (idx > 0) {
+        const [u] = createdUsers.splice(idx, 1);
+        createdUsers.unshift(u);
+      }
+    }
+
+    // Create friendships (Alice <-> Bob accepted, Bob <-> Carol accepted)
+    const fr1 = await db.sendFriendRequest(alice, bob);
+    await db.respondFriendRequest(fr1, true);
+    createdFriends.push({ rowId: fr1, a: alice, b: bob });
+
+    const fr2 = await db.sendFriendRequest(bob, carol);
+    await db.respondFriendRequest(fr2, true);
+    createdFriends.push({ rowId: fr2, a: bob, b: carol });
   }
-
-  // Create friendships (Alice <-> Bob accepted, Bob <-> Carol accepted)
-  const fr1 = await db.sendFriendRequest(alice, bob);
-  await db.respondFriendRequest(fr1, true);
-  createdFriends.push({ rowId: fr1, a: alice, b: bob });
-
-  const fr2 = await db.sendFriendRequest(bob, carol);
-  await db.respondFriendRequest(fr2, true);
-  createdFriends.push({ rowId: fr2, a: bob, b: carol });
 
   // Create events for users
   const now = new Date();
   const inOneHour = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
   const inTwoHours = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
 
-  const e1 = await db.createEvent({ userId: alice, eventTitle: 'Alice Meeting', description: 'Discuss project', startTime: inOneHour, endTime: inTwoHours, date: now.toISOString() });
-  createdEvents.push({ id: e1, ownerId: alice, title: 'Alice Meeting' });
+  // Keep event titles neutral (no creator name embedded)
+  const e1 = await db.createEvent({ userId: alice, eventTitle: 'Team Meeting', description: 'Discuss project', startTime: inOneHour, endTime: inTwoHours, date: now.toISOString() });
+  createdEvents.push({ id: e1, ownerId: alice, title: 'Team Meeting' });
 
-  const e2 = await db.createEvent({ userId: bob, eventTitle: 'Bob Lunch', description: 'Lunch with team', startTime: inOneHour, endTime: inTwoHours, date: now.toISOString() });
-  createdEvents.push({ id: e2, ownerId: bob, title: 'Bob Lunch' });
+  const e2 = await db.createEvent({ userId: bob, eventTitle: 'Lunch', description: 'Lunch with team', startTime: inOneHour, endTime: inTwoHours, date: now.toISOString() });
+  createdEvents.push({ id: e2, ownerId: bob, title: 'Lunch' });
 
   // Free time slot for Carol
   const ft = await db.addFreeTime({ userId: carol, startTime: inOneHour, endTime: inTwoHours });
@@ -194,13 +239,13 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
   const b1 = await db.addFreeTime({ userId: bob, startTime: inOneHour, endTime: in3Hours });
   createdEvents.push({ id: b1, ownerId: bob, title: 'Lunch window (free)' });
   // create a friendly event to show as a friend's event in the calendar
-  const be1 = await db.createEvent({ userId: bob, eventTitle: 'Bob: Team Standup', description: 'Daily sync', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
+  const be1 = await db.createEvent({ userId: bob, eventTitle: 'Team Standup', description: 'Daily sync', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
   createdEvents.push({ id: be1, ownerId: bob, title: 'Team Standup' });
 
   // Carol friend events (study group, coffee)
-  const ce1 = await db.createEvent({ userId: carol, eventTitle: 'Carol: Study Group', description: 'Exam prep', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
+  const ce1 = await db.createEvent({ userId: carol, eventTitle: 'Study Group', description: 'Exam prep', startTime: tomorrowStart, endTime: tomorrowMid, date: tomorrow.toISOString() });
   createdEvents.push({ id: ce1, ownerId: carol, title: 'Study Group' });
-  const ce2 = await db.createEvent({ userId: carol, eventTitle: 'Carol: Coffee', description: 'Catch up', startTime: inTwoHours, endTime: in3Hours, date: now.toISOString() });
+  const ce2 = await db.createEvent({ userId: carol, eventTitle: 'Coffee', description: 'Catch up', startTime: inTwoHours, endTime: in3Hours, date: now.toISOString() });
   createdEvents.push({ id: ce2, ownerId: carol, title: 'Coffee' });
 
   // end additional seed entries
@@ -210,10 +255,13 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
   // the calendar shows multi-day content for development without relying
   // on random seeds. These are lightweight, deterministic examples.
   try {
-    // Support an adjustable number of days (default 7, max 30). If `randomTimes`
-    // is true, vary per-user start times within sensible windows using the
+    // Support an adjustable number of days (default = remainder of current month, max 30).
+    // If `randomTimes` is true, vary per-user start times within sensible windows using the
     // seeded RNG so results can be deterministic when `randomSeed` is provided.
-    const requestedDays = typeof opts?.days === 'number' ? Math.max(1, Math.min(30, Math.floor(opts!.days))) : 7;
+    const today = new Date();
+    const lastOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const daysRemainingInMonth = Math.max(1, Math.floor((lastOfMonth.getDate() - today.getDate()) + 1));
+    const requestedDays = typeof opts?.days === 'number' ? Math.max(1, Math.min(30, Math.floor(opts!.days))) : Math.min(30, daysRemainingInMonth);
     const DAYS = requestedDays;
     const randomTimes = !!opts?.randomTimes;
     for (let d = 0; d < DAYS; d++) {
@@ -226,8 +274,8 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
       const aliceMinute = randomTimes ? pick([0, 15, 30, 45]) : 0;
       const aliceStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aliceHour, aliceMinute, 0).toISOString();
       const aliceEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), aliceHour, aliceMinute + 30, 0).toISOString();
-      const aEv = await db.createEvent({ userId: createdUsers[0].id, eventTitle: `Alice: Daily Sync (day ${d+1})`, description: 'Daily quick sync', startTime: aliceStart, endTime: aliceEnd, date: dayIso });
-      createdEvents.push({ id: aEv, ownerId: createdUsers[0].id, title: `Alice: Daily Sync (day ${d+1})` });
+      const aEv = await db.createEvent({ userId: createdUsers[0].id, eventTitle: `Daily Sync (day ${d+1})`, description: 'Daily quick sync', startTime: aliceStart, endTime: aliceEnd, date: dayIso });
+      createdEvents.push({ id: aEv, ownerId: createdUsers[0].id, title: `Daily Sync (day ${d+1})` });
 
       // Bob: lunch window on weekdays at ~12:00-13:00 (skip weekend-like indices).
       // If randomTimes is enabled, shift the lunch start between 11-13:30.
@@ -239,8 +287,8 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
           const bobMinute = randomTimes ? pick([0, 15, 30]) : 0;
           const bobStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), bobHour, bobMinute, 0).toISOString();
           const bobEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), bobHour + 1, bobMinute, 0).toISOString();
-          const bEv = await db.createEvent({ userId: createdUsers[bobIndex].id, eventTitle: `Bob: Lunch (day ${d+1})`, description: 'Team lunch', startTime: bobStart, endTime: bobEnd, date: dayIso });
-          createdEvents.push({ id: bEv, ownerId: createdUsers[bobIndex].id, title: `Bob: Lunch (day ${d+1})` });
+          const bEv = await db.createEvent({ userId: createdUsers[bobIndex].id, eventTitle: `Lunch (day ${d+1})`, description: 'Team lunch', startTime: bobStart, endTime: bobEnd, date: dayIso });
+          createdEvents.push({ id: bEv, ownerId: createdUsers[bobIndex].id, title: `Lunch (day ${d+1})` });
         }
       }
 
@@ -252,8 +300,8 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
         const carolMinute = randomTimes ? pick([0, 15, 30]) : 0;
         const cStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), carolHour, carolMinute, 0).toISOString();
         const cEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), carolHour + 2, carolMinute, 0).toISOString();
-        const cEv = await db.createEvent({ userId: createdUsers[carolIndex].id, eventTitle: `Carol: Study (day ${d+1})`, description: 'Study group', startTime: cStart, endTime: cEnd, date: dayIso });
-        createdEvents.push({ id: cEv, ownerId: createdUsers[carolIndex].id, title: `Carol: Study (day ${d+1})` });
+        const cEv = await db.createEvent({ userId: createdUsers[carolIndex].id, eventTitle: `Study (day ${d+1})`, description: 'Study group', startTime: cStart, endTime: cEnd, date: dayIso });
+        createdEvents.push({ id: cEv, ownerId: createdUsers[carolIndex].id, title: `Study (day ${d+1})` });
       }
 
       // Additionally add a free-time slot for Alice mid-afternoon on odd days
@@ -282,16 +330,55 @@ export async function seedDummyData(opts?: { force?: boolean; randomize?: boolea
     }
   }
 
+  // Add more sample users and interactions for richer dev data
+  const dave = await ensureUser('dave', 'dave@example.com');
+  const eve = await ensureUser('eve', 'eve@example.com');
+  const frank = await ensureUser('frank', 'frank@example.com');
+
+  // create some accepted friendships among the expanded set
+  try {
+    const fr3 = await db.sendFriendRequest(carol, dave); await db.respondFriendRequest(fr3, true); createdFriends.push({ rowId: fr3, a: carol, b: dave });
+    const fr4 = await db.sendFriendRequest(dave, eve); await db.respondFriendRequest(fr4, true); createdFriends.push({ rowId: fr4, a: dave, b: eve });
+    const fr5 = await db.sendFriendRequest(eve, frank); await db.respondFriendRequest(fr5, true); createdFriends.push({ rowId: fr5, a: eve, b: frank });
+    const fr6 = await db.sendFriendRequest(bob, frank); await db.respondFriendRequest(fr6, true); createdFriends.push({ rowId: fr6, a: bob, b: frank });
+    const fr7 = await db.sendFriendRequest(alice, eve); await db.respondFriendRequest(fr7, true); createdFriends.push({ rowId: fr7, a: alice, b: eve });
+  } catch (e) { /* non-fatal */ }
+
+  // Create some extra events for these users across the month
+  try {
+    const day = new Date();
+    const dayIso = new Date(day.getFullYear(), day.getMonth(), Math.min(day.getDate() + 3, new Date(day.getFullYear(), day.getMonth()+1, 0).getDate())).toISOString();
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 11, 0, 0).toISOString();
+    const end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 12, 0, 0).toISOString();
+    const d1 = await db.createEvent({ userId: dave, eventTitle: 'Design Review', description: 'Review designs', startTime: start, endTime: end, date: dayIso }); createdEvents.push({ id: d1, ownerId: dave, title: 'Design Review' });
+    const e1x = await db.createEvent({ userId: eve, eventTitle: 'Coffee Break', description: 'Informal chat', startTime: start, endTime: end, date: dayIso }); createdEvents.push({ id: e1x, ownerId: eve, title: 'Coffee Break' });
+    const f1 = await db.createEvent({ userId: frank, eventTitle: 'Sprint Planning', description: 'Plan next sprint', startTime: start, endTime: end, date: dayIso }); createdEvents.push({ id: f1, ownerId: frank, title: 'Sprint Planning' });
+  } catch (e) { /* non-fatal */ }
+
+  // Create RSVPs for a selection of events to show interactions
+  try {
+    const knownUserIds = createdUsers.map(u => u.id);
+    for (const ce of createdEvents.slice()) {
+      // skip free-time entries
+      if (!ce.title || /free/i.test(String(ce.title))) continue;
+      // pick up to 3 random invitees excluding owner
+      const ownersId = ce.ownerId;
+      const candidates = knownUserIds.filter(id => id !== ownersId);
+      const inviteCount = Math.min(3, Math.max(0, Math.floor(rng() * candidates.length)));
+      for (let i = 0; i < inviteCount; i++) {
+        const recip = pick(candidates);
+        try {
+          const status = rng() < 0.6 ? 'accepted' : (rng() < 0.5 ? 'pending' : 'declined');
+          const r = await db.createRsvp({ eventId: ce.id, eventOwnerId: ownersId, inviteRecipientId: recip, status });
+          createdRsvps.push({ id: r, eventId: ce.id, inviteRecipientId: recip, status });
+        } catch (e) { /* ignore */ }
+      }
+    }
+  } catch (e) { /* non-fatal */ }
+
   // Preferences
   await db.setUserPreferences(alice, { theme: 1, notificationEnabled: 1, colorScheme: 0 });
   await db.setUserPreferences(bob, { theme: 0, notificationEnabled: 1, colorScheme: 1 });
-
-  // Notifications
-  const n1 = await db.addNotification({ userId: alice, notifMsg: 'Welcome Alice!', notifType: 'welcome' });
-  createdNotifications.push({ id: n1, userId: alice });
-
-  const n2 = await db.addNotification({ userId: bob, notifMsg: 'You have a new friend', notifType: 'friend' });
-  createdNotifications.push({ id: n2, userId: bob });
 
   // RSVPs — Bob and Carol RSVP to Alice's event, Alice RSVPs to Bob's
   try {
