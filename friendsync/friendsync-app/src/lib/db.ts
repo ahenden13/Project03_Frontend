@@ -23,7 +23,7 @@ import storage from './storage';
 import * as FirebaseSync from './firebaseSync';
 
 // ⚠️ TEMPORARILY DISABLE FIREBASE SYNC TO STOP DUPLICATES
-FirebaseSync.setFirebaseSyncEnabled(false);  // ← ADD THIS LINE!
+// FirebaseSync.setFirebaseSyncEnabled(false);  // ← ADD THIS LINE!
 
 const FALLBACK_KEY = 'fallback_db_v1';
 
@@ -204,7 +204,13 @@ export function getStatus() { return { initialized, backend: useNative ? 'native
 // USERS
 // ============================================================================
 
-export async function createUser(user: { username: string; email: string; password?: string; phone_number?: string | null; }): Promise<number> {
+export async function createUser(user: { 
+  username: string; 
+  email: string; 
+  password?: string; 
+  phone_number?: string | null;
+  firebaseUid?: string; // ← ADD THIS
+}): Promise<number> {
   await tryInitNative();
   let userId: number;
   
@@ -218,10 +224,14 @@ export async function createUser(user: { username: string; email: string; passwo
     await saveFallback(db);
   }
   
-  // Sync to Firebase
+  // Sync to Firebase with Firebase UID
   if (FirebaseSync.isFirebaseSyncEnabled() && userId) {
     try {
-      await FirebaseSync.syncUserToFirebase({ ...user, userId });
+      await FirebaseSync.syncUserToFirebase({ 
+        ...user, 
+        userId,
+        firebaseUid: user.firebaseUid // ← PASS THE FIREBASE UID
+      });
     } catch (error) {
       console.warn('Failed to sync user to Firebase:', error);
     }
