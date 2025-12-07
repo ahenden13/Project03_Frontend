@@ -22,6 +22,9 @@ import { Platform } from 'react-native';
 import storage from './storage';
 import * as FirebaseSync from './firebaseSync';
 
+// ⚠️ TEMPORARILY DISABLE FIREBASE SYNC TO STOP DUPLICATES
+FirebaseSync.setFirebaseSyncEnabled(false);  // ← ADD THIS LINE!
+
 const FALLBACK_KEY = 'fallback_db_v1';
 
 type Row = { [k: string]: any };
