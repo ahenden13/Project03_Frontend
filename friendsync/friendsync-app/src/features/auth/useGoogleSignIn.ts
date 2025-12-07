@@ -188,7 +188,7 @@ export function useGoogleSignIn() {
         console.warn('[Auth] failed to verify/create local user for signed-in account', e);
       }
 
-      // 4. Set up sync
+      // 4. Set up sync -- disabled temporarily
       simpleSync.setAuthToken(token);
       
       // Use Firebase UID as userId (your backend should handle this)
@@ -215,11 +215,11 @@ export function useGoogleSignIn() {
         localId = Number(local.userId);
       } else {
         const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
-        localId = await db.createUser({ username: uname, email: u.email || '' });
+        localId = await db.createUser({ username: uname, email: u.email || '', firebaseUid: u.uid });
       }
       if (localId != null) {
         await AsyncStorage.setItem('userId', String(localId));
-        await AsyncStorage.setItem('userEmail', u.email || '');
+        await AsyncStorage.setItem('userEmail', u.email || '' );
         // store a human-friendly name for UI
         try {
           const lu = await db.getUserById(localId);

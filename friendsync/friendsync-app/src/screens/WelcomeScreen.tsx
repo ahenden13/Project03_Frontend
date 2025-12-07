@@ -35,9 +35,9 @@ export default function WelcomeScreen() {
 
     if (token && userId && userId !== 'null' && userId !== 'undefined') {
       // User is logged in, ensure sync is running
-      simpleSync.setAuthToken(token);
-      simpleSync.startAutoSync(userId); // This is already a string, which is fine
-      setSyncStatus("✓ Syncing every 5 minutes");
+      // simpleSync.setAuthToken(token);
+      // simpleSync.startAutoSync(userId); // This is already a string, which is fine
+      setSyncStatus("✓ logged in");
       console.log("[Welcome] Sync resumed for existing session");
     } else {
       setSyncStatus("Not logged in");
