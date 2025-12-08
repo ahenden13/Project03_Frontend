@@ -175,7 +175,8 @@ async function createNativeTables() {
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS users (
     userId INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT,
-    username TEXT
+    username TEXT,
+    firebaseUid TEXT
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS notifications (
@@ -195,6 +196,15 @@ export async function init_db() {
     await loadFallback();
   }
   initialized = true;
+  // Run a non-destructive dedupe dry-run at init for consistent detection
+  try {
+    const report = await runDuplicateCleanup({ dryRun: true });
+    if (report && report.groups && Array.isArray(report.groups) && report.groups.length > 0) {
+      console.warn('db.init_db: duplicate user groups detected (dry-run):', report.groups);
+    }
+  } catch (e) {
+    // ignore dedupe errors at startup
+  }
   return true;
 }
 
@@ -215,12 +225,12 @@ export async function createUser(user: {
   let userId: number;
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username) VALUES (?, ?);', [user.email, user.username]);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, firebaseUid) VALUES (?, ?, ?);', [user.email, user.username, user.firebaseUid ?? null]);
     userId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     userId = nextId(db, 'users');
-    db.users.push({ userId, username: user.username, email: user.email });
+    db.users.push({ userId, username: user.username, email: user.email, firebaseUid: user.firebaseUid ?? null });
     await saveFallback(db);
   }
   
@@ -238,6 +248,41 @@ export async function createUser(user: {
   }
   
   return userId;
+}
+
+export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | null> {
+  await tryInitNative();
+  if (!firebaseUid) return null;
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE firebaseUid = ?;', [firebaseUid]);
+    return (res.rows._array as any[])[0] ?? null;
+  }
+  const db = await loadFallback();
+  return db.users.find((u: any) => u.firebaseUid === firebaseUid) ?? null;
+}
+
+export async function resolveLocalUserId(): Promise<number | null> {
+  try {
+    const storedId = await storage.getItem<any>('userId');
+    const storedUid = await storage.getItem<any>('firebaseUid');
+
+    // Prefer mapping by firebaseUid if available
+    if (storedUid) {
+      const byUid = await getUserByFirebaseUid(String(storedUid));
+      if (byUid && byUid.userId) return Number(byUid.userId);
+    }
+
+    if (storedId != null) {
+      const asNum = Number(storedId);
+      if (!Number.isNaN(asNum)) {
+        const u = await getUserById(asNum);
+        if (u && u.userId) return Number(u.userId);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
 }
 
 export async function getUserById(userId: number): Promise<any | null> {
@@ -280,7 +325,7 @@ export async function getAllUsers(): Promise<any[]> {
   return db.users;
 }
 
-export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null; }) {
+export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null; firebaseUid?: string | null }) {
   await tryInitNative();
   
   if (useNative && nativeDb) {
@@ -288,6 +333,7 @@ export async function updateUser(userId: number, updates: { username?: string; e
     const params: any[] = [];
     if (updates.username !== undefined) { sets.push('username = ?'); params.push(updates.username); }
     if (updates.email !== undefined) { sets.push('email = ?'); params.push(updates.email); }
+    if (updates.firebaseUid !== undefined) { sets.push('firebaseUid = ?'); params.push(updates.firebaseUid); }
     if (sets.length === 0) return;
     params.push(userId);
     await execSqlNative(nativeDb, `UPDATE users SET ${sets.join(', ')} WHERE userId = ?;`, params);
@@ -755,6 +801,248 @@ export async function getUserPreferences(userId: number): Promise<any | null> {
   return db.user_prefs.find((p: any) => p.userId === userId) ?? null;
 }
 
+// ============================================================================
+// DEDUPE HELPERS
+// ============================================================================
+
+export async function findUserDuplicates(): Promise<Array<{ keepId: number; duplicateIds: number[]; by: string }>> {
+  const users = await getAllUsers();
+  const seen = new Set<number>();
+  const groups: Array<{ keepId: number; duplicateIds: number[]; by: string }> = [];
+
+  const scoreUser = (u: any) => {
+    // Higher score => more complete / preferred as keeper
+    let s = 0;
+    if (u && u.firebaseUid) s += 100;
+    if (u && u.username && String(u.username).trim().length > 0) s += 10;
+    if (u && u.email && String(u.email).trim().length > 0) s += 1;
+    return s;
+  };
+
+  // 1) Group by firebaseUid first (strongest identity)
+  const byUid: { [uid: string]: any[] } = {};
+  users.forEach((u: any) => { if (u && u.firebaseUid) { (byUid[String(u.firebaseUid)] = byUid[String(u.firebaseUid)] || []).push(u); } });
+  Object.keys(byUid).forEach((uid) => {
+    const arr = byUid[uid];
+    if (arr.length > 1) {
+      // select keeper by highest score, fallback to lowest userId
+      arr.sort((a: any, b: any) => {
+        const d = scoreUser(b) - scoreUser(a);
+        if (d !== 0) return d;
+        return Number(a.userId) - Number(b.userId);
+      });
+      const keeper = arr[0];
+      const dupIds = arr.slice(1).map(x => Number(x.userId));
+      dupIds.forEach(i => seen.add(i));
+      groups.push({ keepId: Number(keeper.userId), duplicateIds: dupIds, by: 'firebaseUid' });
+    }
+  });
+
+  // 2) Group by normalized email for remaining users
+  const byEmail: { [email: string]: any[] } = {};
+
+  const extractEmail = (u: any) => {
+    if (!u) return '';
+    // handle alternate property names that might hold email
+    const candidates = [u.email, u.userEmail, u.emailAddress, u.email_address, u.mail];
+    for (const c of candidates) {
+      if (c && String(c).trim().length > 0) return String(c).trim();
+    }
+    return '';
+  };
+
+  const normalizeEmail = (raw: string) => {
+    if (!raw) return '';
+    const e = String(raw).toLowerCase().trim();
+    const parts = e.split('@');
+    if (parts.length !== 2) return e;
+    let [local, domain] = parts;
+    // Remove plus tags and dots for Gmail/Googlemail addresses
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+      local = local.split('+')[0].replace(/\./g, '');
+      domain = 'gmail.com';
+    } else {
+      // For other providers, still strip plus tags (common pattern)
+      local = local.split('+')[0];
+    }
+    return `${local}@${domain}`;
+  };
+
+  users.forEach((u: any) => {
+    const raw = extractEmail(u);
+    const e = normalizeEmail(raw);
+    if (e) {
+      (byEmail[e] = byEmail[e] || []).push(u);
+    }
+  });
+  Object.keys(byEmail).forEach((email) => {
+    const arr = byEmail[email];
+    const unique = arr.filter(x => !seen.has(Number(x.userId)));
+    if (unique.length > 1) {
+      // choose keeper by completeness score
+      unique.sort((a: any, b: any) => {
+        const d = scoreUser(b) - scoreUser(a);
+        if (d !== 0) return d;
+        return Number(a.userId) - Number(b.userId);
+      });
+      const keeper = unique[0];
+      const dupIds = unique.slice(1).map(x => Number(x.userId));
+      dupIds.forEach(i => seen.add(i));
+      groups.push({ keepId: Number(keeper.userId), duplicateIds: dupIds, by: 'email' });
+    }
+  });
+
+  // 3) Group by username (fallback) for users missing email/firebaseUid
+  const byName: { [name: string]: any[] } = {};
+  users.forEach((u: any) => {
+    const rawEmail = extractEmail(u);
+    const hasUidOrEmail = !!(u && (u.firebaseUid || (rawEmail && String(rawEmail).trim().length > 0)));
+    if (hasUidOrEmail) return; // we already handled these
+    const n = (u && (u.username || u.name)) ? String(u.username || u.name).toLowerCase().trim() : '';
+    if (n) (byName[n] = byName[n] || []).push(u);
+  });
+  Object.keys(byName).forEach((name) => {
+    const arr = byName[name];
+    if (arr.length > 1) {
+      arr.sort((a: any, b: any) => {
+        const d = scoreUser(b) - scoreUser(a);
+        if (d !== 0) return d;
+        return Number(a.userId) - Number(b.userId);
+      });
+      const keeper = arr[0];
+      const dupIds = arr.slice(1).map(x => Number(x.userId));
+      dupIds.forEach(i => seen.add(i));
+      groups.push({ keepId: Number(keeper.userId), duplicateIds: dupIds, by: 'username' });
+    }
+  });
+
+  return groups;
+}
+
+export async function mergeUsers(keepId: number, removeId: number): Promise<void> {
+  if (!keepId || !removeId || keepId === removeId) return;
+
+  // Prefer keeper selection policy: if the `removeId` row has a firebaseUid
+  // but the `keepId` row does not, swap them so we keep the row with firebaseUid.
+  try {
+    const a = await getUserById(keepId);
+    const b = await getUserById(removeId);
+    const aHas = !!(a && a.firebaseUid);
+    const bHas = !!(b && b.firebaseUid);
+    if (!aHas && bHas) {
+      // swap so that we keep the row that has firebaseUid
+      const tmp = keepId; keepId = removeId; removeId = tmp;
+    }
+  } catch (e) {
+    // ignore any lookup errors and continue with provided ids
+  }
+
+  // NOTE: Do NOT move or delete events during user merges.
+  // Keeping events intact avoids side-effects where duplicate cleanup inadvertently
+  // changes event ownership or removes user-created events. RSVPs referencing
+  // events will be adjusted below to point to the keeper user where appropriate,
+  // but `events` rows themselves are left untouched.
+  const eventIdMap: { [oldId: number]: number } = {};
+
+  // 2) Move RSVPs: recreate with same eventId (no event recreation) but remapped userIds where needed,
+  // then delete the old RSVP entries. This updates ownership/invitee references without touching events.
+  const rsvps = await getRsvpsForUser(removeId);
+  for (const r of rsvps) {
+    const newOwner = (Number(r.eventOwnerId) === Number(removeId)) ? keepId : r.eventOwnerId;
+    const newInvitee = (Number(r.inviteRecipientId) === Number(removeId)) ? keepId : r.inviteRecipientId;
+    try {
+      await createRsvp({ eventId: Number(r.eventId), eventOwnerId: Number(newOwner), inviteRecipientId: Number(newInvitee), status: r.status });
+    } catch (e) {
+      // ignore creation errors but continue attempting to delete the old RSVP
+    }
+    try { await deleteRsvp(Number(r.rsvpId)); } catch (e) { /* ignore */ }
+  }
+
+  // 3) Move friends: recreate friendships for keepId and remove old
+  const friends = await getFriendsForUser(removeId);
+  const keepFriends = await getFriendsForUser(keepId);
+  const keepFriendSet = new Set<number>(keepFriends.map((f: any) => (f.userId === keepId ? f.friendId : f.userId)));
+  for (const f of friends) {
+    const other = (Number(f.userId) === Number(removeId)) ? f.friendId : f.userId;
+    if (Number(other) === Number(keepId)) {
+      // self-reference after merge — just remove
+      try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+      continue;
+    }
+    if (keepFriendSet.has(Number(other))) {
+      // already friends with keeper, remove old relation
+      try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+      continue;
+    }
+    // create friend relation under keepId
+    try {
+      const newRow = await sendFriendRequest(keepId, Number(other));
+      if (f.status === 'accepted') {
+        const requests = await getFriendRequestsForUser(keepId);
+        const req = requests.find((r2: any) => Number(r2.friendId) === Number(other));
+        if (req) await respondFriendRequest(req.friendRowId, true);
+      }
+    } catch (e) {
+      // ignore create errors
+    }
+    try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+  }
+
+  // 4) Move notifications
+  const notes = await getNotificationsForUser(removeId);
+  for (const n of notes) {
+    try { await addNotification({ userId: keepId, notifMsg: n.notifMsg, notifType: n.notifType, timestamp: n.createdAt }); } catch (e) { /* ignore */ }
+  }
+  try { await clearNotificationsForUser(removeId); } catch (e) { /* ignore */ }
+
+  // 5) Merge preferences (keep existing keeper prefs, fill missing from remove)
+  try {
+    const fromPrefs = await getUserPreferences(removeId);
+    if (fromPrefs) {
+      const toPrefs = await getUserPreferences(keepId) || {};
+      const merged = {
+        theme: toPrefs.theme ?? fromPrefs.theme,
+        notificationEnabled: toPrefs.notificationEnabled ?? fromPrefs.notificationEnabled,
+        colorScheme: toPrefs.colorScheme ?? fromPrefs.colorScheme,
+      };
+      await setUserPreferences(keepId, merged as any);
+    }
+  } catch (e) { /* ignore */ }
+
+  // 6) Finally delete the removed user row
+  try { await deleteUser(removeId); } catch (e) { /* ignore */ }
+}
+
+export async function runDuplicateCleanup(options?: { dryRun?: boolean; autoMerge?: boolean }): Promise<any> {
+  const dryRun = options?.dryRun ?? true;
+  const autoMerge = options?.autoMerge ?? false;
+  const groups = await findUserDuplicates();
+  const report: any[] = [];
+  for (const g of groups) {
+    report.push({ keepId: g.keepId, duplicateIds: g.duplicateIds, by: g.by });
+  }
+
+  if (dryRun) return { dryRun: true, groups: report };
+
+  const results: any[] = [];
+  for (const g of groups) {
+    for (const dup of g.duplicateIds) {
+      if (autoMerge) {
+        try {
+          await mergeUsers(g.keepId, dup);
+          results.push({ keep: g.keepId, removed: dup, status: 'merged' });
+        } catch (e) {
+          results.push({ keep: g.keepId, removed: dup, status: 'failed', error: String(e) });
+        }
+      } else {
+        // destructive delete without merge is not implemented by default
+        results.push({ keep: g.keepId, removed: dup, status: 'skipped', reason: 'autoMerge disabled' });
+      }
+    }
+  }
+  return { dryRun: false, results };
+}
+
 export default {
   init_db,
   
@@ -800,7 +1088,13 @@ export default {
   
   // New helpers
   getUserByEmail,
+  getUserByFirebaseUid,
+  resolveLocalUserId,
   getAllUsers,
+  // Dedupe helpers
+  findUserDuplicates,
+  mergeUsers,
+  runDuplicateCleanup,
 
   getStatus,
 };
