@@ -83,12 +83,13 @@ export async function syncFromBackend(userId: number): Promise<void> {
       fetchFromBackend(`/api/preferences/${userIdParam}`).catch(() => null),
     ]);
 
-if (Array.isArray(allUsers)) {
+  if (Array.isArray(allUsers)) {
   console.log('syncFromBackend: fetched users count=', allUsers.length);
   for (const user of allUsers) {
     // Prefer matching by firebaseUid (if provided), then email, then numeric id
     let localMatch: any = null;
-    const possibleUid = (user.firebaseUid || user.uid || user.id || null);
+    // backend may use different key names for the firebase uid — support common variants
+    const possibleUid = (user.firebaseUid || user.userFirebaseUid || user.uid || user.id || user.user_id || null);
     try {
       if (possibleUid) localMatch = await db.getUserByFirebaseUid(String(possibleUid));
     } catch (e) { /* ignore */ }
@@ -96,7 +97,7 @@ if (Array.isArray(allUsers)) {
       if (!localMatch && user.email) localMatch = await db.getUserByEmail(user.email);
     } catch (e) { /* ignore */ }
     try {
-      if (!localMatch && user.userId) localMatch = await db.getUserById(Number(user.userId));
+      if (!localMatch && (user.userId || user.id)) localMatch = await db.getUserById(Number(user.userId ?? user.id));
     } catch (e) { /* ignore */ }
 
     if (localMatch && localMatch.userId) {
@@ -193,8 +194,10 @@ if (Array.isArray(allUsers)) {
             if (u && u.userId) friendLocalId = Number(u.userId);
           }
         } catch {}
-        if (!friendLocalId && friend.firebaseUid) {
-          const u = await db.getUserByFirebaseUid(String(friend.firebaseUid));
+        // also support variants like friend.friendFirebaseUid or friend.userFirebaseUid
+        if (!friendLocalId && (friend.friendFirebaseUid || friend.userFirebaseUid || friend.firebaseUid)) {
+          const uidStr = String(friend.friendFirebaseUid || friend.userFirebaseUid || friend.firebaseUid);
+          const u = await db.getUserByFirebaseUid(uidStr);
           if (u && u.userId) friendLocalId = Number(u.userId);
         }
         if (!friendLocalId && friend.email) {
@@ -235,13 +238,30 @@ if (Array.isArray(allUsers)) {
             if (u && u.userId) inviteeLocalId = Number(u.userId);
           }
         } catch {}
-        if (!inviteeLocalId && rsvp.inviteRecipientFirebaseUid) {
-          const u = await db.getUserByFirebaseUid(String(rsvp.inviteRecipientFirebaseUid));
+        // support multiple backend field variants for the invitee's firebase uid
+        if (!inviteeLocalId && (rsvp.inviteRecipientFirebaseUid || rsvp.invite_recipient_firebase_uid || rsvp.inviteRecipientUid || rsvp.inviteRecipientUserFirebaseUid)) {
+          const uidStr = String(rsvp.inviteRecipientFirebaseUid || rsvp.invite_recipient_firebase_uid || rsvp.inviteRecipientUid || rsvp.inviteRecipientUserFirebaseUid);
+          const u = await db.getUserByFirebaseUid(uidStr);
           if (u && u.userId) inviteeLocalId = Number(u.userId);
         }
-        if (!inviteeLocalId && rsvp.inviteRecipientEmail) {
-          const u = await db.getUserByEmail(String(rsvp.inviteRecipientEmail));
+        if (!inviteeLocalId && (rsvp.inviteRecipientEmail || rsvp.invite_recipient_email)) {
+          const u = await db.getUserByEmail(String(rsvp.inviteRecipientEmail || rsvp.invite_recipient_email));
           if (u && u.userId) inviteeLocalId = Number(u.userId);
+        }
+
+        // Map event owner id to local id when backend provides owner's firebase uid
+        let ownerLocalId: number | null = null;
+        try {
+          const asNumO = Number(rsvp.eventOwnerId);
+          if (Number.isFinite(asNumO) && !Number.isNaN(asNumO)) {
+            const uo = await db.getUserById(asNumO);
+            if (uo && uo.userId) ownerLocalId = Number(uo.userId);
+          }
+        } catch {}
+        if (!ownerLocalId && (rsvp.eventOwnerFirebaseUid || rsvp.event_owner_firebase_uid || rsvp.eventOwnerUid)) {
+          const uidStr = String(rsvp.eventOwnerFirebaseUid || rsvp.event_owner_firebase_uid || rsvp.eventOwnerUid);
+          const uo = await db.getUserByFirebaseUid(uidStr);
+          if (uo && uo.userId) ownerLocalId = Number(uo.userId);
         }
 
         // Map eventId: prefer to find a local event with same startTime+title for this local user
@@ -271,7 +291,7 @@ if (Array.isArray(allUsers)) {
         if (!exists) {
           await db.createRsvp({
             eventId: localEventId ?? rsvp.eventId,
-            eventOwnerId: rsvp.eventOwnerId,
+            eventOwnerId: ownerLocalId ?? rsvp.eventOwnerId,
             inviteRecipientId: inviteeLocalId ?? rsvp.inviteRecipientId,
             status: rsvp.status,
           });

@@ -356,7 +356,13 @@ export async function updateUser(userId: number, updates: { username?: string; e
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
-      await FirebaseSync.updateUserInFirebase(userId, updates);
+      // pass firebaseUid when available so Firebase update can target the correct doc
+      let __userFb: string | null = null;
+      if (updates.firebaseUid !== undefined) __userFb = updates.firebaseUid ?? null;
+      else {
+        try { const uu = await getUserById(userId); __userFb = uu?.firebaseUid ?? null; } catch (_) { __userFb = null; }
+      }
+      await FirebaseSync.updateUserInFirebase(userId, updates, __userFb ?? undefined);
     } catch (error) {
       console.warn('Failed to update user in Firebase:', error);
     }
@@ -377,7 +383,10 @@ export async function deleteUser(userId: number) {
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
-      await FirebaseSync.deleteUserFromFirebase(userId);
+      // pass firebaseUid when available for direct delete by UID
+      let __delFb: string | null = null;
+      try { const uu = await getUserById(userId); __delFb = uu?.firebaseUid ?? null; } catch (_) { __delFb = null; }
+      await FirebaseSync.deleteUserFromFirebase(userId, __delFb ?? undefined);
     } catch (error) {
       console.warn('Failed to delete user from Firebase:', error);
     }
@@ -415,7 +424,12 @@ export async function sendFriendRequest(userId: number, friendId: number): Promi
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled() && friendRowId) {
     try {
-      await FirebaseSync.syncFriendRequestToFirebase({ friendRowId, userId, friendId, status: 'pending' });
+      // Resolve firebaseUid for both sides to include in the payload
+      let __uFb: string | null = null;
+      let __fFb: string | null = null;
+      try { const uu = await getUserById(userId); __uFb = uu?.firebaseUid ?? null; } catch (_) { __uFb = null; }
+      try { const ff = await getUserById(friendId); __fFb = ff?.firebaseUid ?? null; } catch (_) { __fFb = null; }
+      await FirebaseSync.syncFriendRequestToFirebase({ friendRowId, userId, friendId, status: 'pending', userFirebaseUid: __uFb, friendFirebaseUid: __fFb });
     } catch (error) {
       console.warn('Failed to sync friend request to Firebase:', error);
     }
@@ -561,7 +575,11 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled() && rsvpId) {
     try {
-      await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp });
+      // attach firebaseUid variants for owner and invitee
+      let __ownerFb: string | null = null; let __inviteeFb: string | null = null;
+      try { const o = await getUserById(rsvp.eventOwnerId); __ownerFb = o?.firebaseUid ?? null; } catch (_) { __ownerFb = null; }
+      try { const v = await getUserById(rsvp.inviteRecipientId); __inviteeFb = v?.firebaseUid ?? null; } catch (_) { __inviteeFb = null; }
+      await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp, eventOwnerFirebaseUid: __ownerFb, inviteRecipientFirebaseUid: __inviteeFb });
     } catch (error) {
       console.warn('Failed to sync RSVP to Firebase:', error);
     }
@@ -668,7 +686,10 @@ export async function createEvent(event: { userId: number; eventTitle?: string |
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled() && eventId) {
     try {
-      await FirebaseSync.syncEventToFirebase({ eventId, ...event, eventTitle: title });
+      // include owner firebase uid when available
+      let __ownerFb: string | null = null;
+      try { const o = await getUserById(event.userId); __ownerFb = o?.firebaseUid ?? null; } catch (_) { __ownerFb = null; }
+      await FirebaseSync.syncEventToFirebase({ eventId, ...event, eventTitle: title, userFirebaseUid: __ownerFb });
     } catch (error) {
       console.warn('Failed to sync event to Firebase:', error);
     }
@@ -900,7 +921,10 @@ export async function setUserPreferences(userId: number, prefs: { theme?: number
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
-      await FirebaseSync.syncUserPreferencesToFirebase(userId, prefs);
+      // include user's firebaseUid where possible
+      let __prefsFb: string | null = null;
+      try { const uu = await getUserById(userId); __prefsFb = uu?.firebaseUid ?? null; } catch (_) { __prefsFb = null; }
+      await FirebaseSync.syncUserPreferencesToFirebase(userId, prefs, __prefsFb);
     } catch (error) {
       console.warn('Failed to sync preferences to Firebase:', error);
     }
