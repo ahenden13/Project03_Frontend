@@ -86,6 +86,7 @@ async function loadFallback(): Promise<DBShape> {
     rsvps: Array.isArray(val.rsvps) ? val.rsvps : [],
     user_prefs: Array.isArray(val.user_prefs) ? val.user_prefs : [],
     events: Array.isArray(val.events) ? val.events : [],
+    // Ensure legacy event rows may have userFirebaseUid
     notifications: Array.isArray(val.notifications) ? val.notifications : [],
   };
 
@@ -143,13 +144,16 @@ async function createNativeTables() {
     isEvent INTEGER,
     recurring INTEGER,
     startTime TEXT,
-    userId INTEGER
+    userId INTEGER,
+    userFirebaseUid TEXT
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS friends (
     friendRowId INTEGER PRIMARY KEY AUTOINCREMENT,
     userId INTEGER,
     friendId INTEGER,
+    userFirebaseUid TEXT,
+    friendFirebaseUid TEXT,
     status TEXT
   );`);
 
@@ -158,7 +162,9 @@ async function createNativeTables() {
     createdAt TEXT,
     eventId INTEGER,
     eventOwnerId INTEGER,
+    eventOwnerFirebaseUid TEXT,
     inviteRecipientId INTEGER,
+    inviteRecipientFirebaseUid TEXT,
     status TEXT,
     updatedAt TEXT
   );`);
@@ -166,6 +172,7 @@ async function createNativeTables() {
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS user_prefs (
     preferenceId INTEGER PRIMARY KEY AUTOINCREMENT,
     userId INTEGER,
+    userFirebaseUid TEXT,
     colorScheme INTEGER,
     notificationEnabled INTEGER,
     theme INTEGER,
@@ -183,6 +190,7 @@ async function createNativeTables() {
     notificationId INTEGER PRIMARY KEY AUTOINCREMENT,
     notifMsg TEXT,
     userId INTEGER,
+    userFirebaseUid TEXT,
     notifType TEXT,
     createdAt TEXT
   );`);
@@ -385,12 +393,22 @@ export async function sendFriendRequest(userId: number, friendId: number): Promi
   let friendRowId: number;
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO friends (userId, friendId, status) VALUES (?, ?, ?);', [userId, friendId, 'pending']);
+    // fetch firebase UIDs for both sides when available
+    let uFirebase: string | null = null;
+    let fFirebase: string | null = null;
+    try { const ru = await execSqlNative(nativeDb, 'SELECT firebaseUid FROM users WHERE userId = ?;', [userId]); const rowu = (ru.rows._array as any[])[0] ?? null; if (rowu && rowu.firebaseUid) uFirebase = rowu.firebaseUid; } catch (_) { uFirebase = null; }
+    try { const rf = await execSqlNative(nativeDb, 'SELECT firebaseUid FROM users WHERE userId = ?;', [friendId]); const rowf = (rf.rows._array as any[])[0] ?? null; if (rowf && rowf.firebaseUid) fFirebase = rowf.firebaseUid; } catch (_) { fFirebase = null; }
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO friends (userId, friendId, userFirebaseUid, friendFirebaseUid, status) VALUES (?, ?, ?, ?, ?);', [userId, friendId, uFirebase ?? null, fFirebase ?? null, 'pending']);
     friendRowId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     friendRowId = nextId(db, 'friends');
-    db.friends.push({ friendRowId, userId, friendId, status: 'pending' });
+    // attach firebase UIDs for both sides when possible to make lookups robust
+    let userFirebase: string | null = null;
+    let friendFirebase: string | null = null;
+    try { const u = db.users.find((x: any) => Number(x.userId) === Number(userId)); if (u && u.firebaseUid) userFirebase = u.firebaseUid; } catch (_) { userFirebase = null; }
+    try { const f = db.users.find((x: any) => Number(x.userId) === Number(friendId)); if (f && f.firebaseUid) friendFirebase = f.firebaseUid; } catch (_) { friendFirebase = null; }
+    db.friends.push({ friendRowId, userId, friendId, userFirebaseUid: userFirebase ?? null, friendFirebaseUid: friendFirebase ?? null, status: 'pending' });
     await saveFallback(db);
   }
   
@@ -427,6 +445,45 @@ export async function respondFriendRequest(friendRowId: number, accept: boolean)
       await FirebaseSync.updateFriendRequestInFirebase(friendRowId, newStatus);
     } catch (error) {
       console.warn('Failed to update friend request in Firebase:', error);
+    }
+  }
+
+  // If the request was accepted, ensure the accepter gets RSVPs for existing events
+  if (accept) {
+    try {
+      // Load the friend row to determine requester and recipient
+      let row: any = null;
+      if (useNative && nativeDb) {
+        try {
+          const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE friendRowId = ?;', [friendRowId]);
+          row = (res.rows._array as any[])[0] ?? null;
+        } catch (e) { row = null; }
+      } else {
+        try {
+          const fdb = await loadFallback();
+          row = fdb.friends.find((f: any) => f.friendRowId === friendRowId) ?? null;
+        } catch (e) { row = null; }
+      }
+
+      if (row) {
+        const requester = Number(row.userId);
+        const recipient = Number(row.friendId);
+        if (requester && recipient) {
+          // For each event owned by the requester, create an RSVP for the recipient if missing
+          const events = await getEventsForUser(requester);
+          for (const ev of events) {
+            try {
+              const existing = (await getRsvpsForEvent(Number(ev.eventId))) || [];
+              const has = existing.find((r: any) => Number(r.inviteRecipientId) === recipient);
+              if (!has) {
+                try { await createRsvp({ eventId: Number(ev.eventId), eventOwnerId: requester, inviteRecipientId: recipient, status: 'pending' }); } catch (_) { /* ignore per-item */ }
+              }
+            } catch (_) { /* ignore per-event */ }
+          }
+        }
+      }
+    } catch (e) {
+      // ignore background RSVP creation errors
     }
   }
 }
@@ -482,12 +539,22 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
   const now = new Date().toISOString();
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO rsvps (eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?);', [rsvp.eventId, rsvp.eventOwnerId, rsvp.inviteRecipientId, rsvp.status, now, now]);
+    // resolve firebase UIDs for owner and invitee when possible
+    let ownerFb: string | null = null;
+    let inviteeFb: string | null = null;
+    try { const ru = await execSqlNative(nativeDb, 'SELECT firebaseUid FROM users WHERE userId = ?;', [rsvp.eventOwnerId]); const rowu = (ru.rows._array as any[])[0] ?? null; if (rowu && rowu.firebaseUid) ownerFb = rowu.firebaseUid; } catch (_) { ownerFb = null; }
+    try { const rv = await execSqlNative(nativeDb, 'SELECT firebaseUid FROM users WHERE userId = ?;', [rsvp.inviteRecipientId]); const rowv = (rv.rows._array as any[])[0] ?? null; if (rowv && rowv.firebaseUid) inviteeFb = rowv.firebaseUid; } catch (_) { inviteeFb = null; }
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO rsvps (eventId, eventOwnerId, eventOwnerFirebaseUid, inviteRecipientId, inviteRecipientFirebaseUid, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?);', [rsvp.eventId, rsvp.eventOwnerId, ownerFb ?? null, rsvp.inviteRecipientId, inviteeFb ?? null, rsvp.status, now, now]);
     rsvpId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     rsvpId = nextId(db, 'rsvps');
-    db.rsvps.push({ rsvpId, ...rsvp, createdAt: now, updatedAt: now });
+    // include firebase UIDs for owner and invitee when available
+    let ownerFirebase: string | null = null;
+    let inviteeFirebase: string | null = null;
+    try { const u = db.users.find((x: any) => Number(x.userId) === Number(rsvp.eventOwnerId)); if (u && u.firebaseUid) ownerFirebase = u.firebaseUid; } catch (_) { ownerFirebase = null; }
+    try { const v = db.users.find((x: any) => Number(x.userId) === Number(rsvp.inviteRecipientId)); if (v && v.firebaseUid) inviteeFirebase = v.firebaseUid; } catch (_) { inviteeFirebase = null; }
+    db.rsvps.push({ rsvpId, ...rsvp, eventOwnerFirebaseUid: ownerFirebase ?? null, inviteRecipientFirebaseUid: inviteeFirebase ?? null, createdAt: now, updatedAt: now });
     await saveFallback(db);
   }
   
@@ -579,12 +646,22 @@ export async function createEvent(event: { userId: number; eventTitle?: string |
   const title = event.eventTitle ?? 'Untitled Event';
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO events (userId, eventTitle, description, startTime, endTime, isEvent, recurring, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?);', [event.userId, title, event.description ?? null, event.startTime, event.endTime ?? null, event.isEvent ?? 1, event.recurring ?? 0, event.date ?? null]);
+    // fetch owner's firebaseUid when available so we can persist it alongside the event
+    let ownerFirebaseUidNative: string | null = null;
+    try {
+      const ru = await execSqlNative(nativeDb, 'SELECT firebaseUid FROM users WHERE userId = ?;', [event.userId]);
+      const row = (ru.rows._array as any[])[0] ?? null;
+      if (row && row.firebaseUid) ownerFirebaseUidNative = row.firebaseUid;
+    } catch (e) { ownerFirebaseUidNative = null; }
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO events (userId, userFirebaseUid, eventTitle, description, startTime, endTime, isEvent, recurring, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);', [event.userId, ownerFirebaseUidNative ?? null, title, event.description ?? null, event.startTime, event.endTime ?? null, event.isEvent ?? 1, event.recurring ?? 0, event.date ?? null]);
     eventId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     eventId = nextId(db, 'events');
-    db.events.push({ eventId, userId: event.userId, eventTitle: title, description: event.description ?? null, startTime: event.startTime, endTime: event.endTime ?? null, date: event.date ?? null, isEvent: event.isEvent ?? 1, recurring: event.recurring ?? 0 });
+    // attach owner's firebaseUid when possible for easier resolution later
+    let ownerFirebaseUid: string | null = null;
+    try { const owner = db.users.find((u: any) => Number(u.userId) === Number(event.userId)); if (owner && owner.firebaseUid) ownerFirebaseUid = owner.firebaseUid; } catch (_) { ownerFirebaseUid = null; }
+    db.events.push({ eventId, userId: event.userId, userFirebaseUid: ownerFirebaseUid ?? null, eventTitle: title, description: event.description ?? null, startTime: event.startTime, endTime: event.endTime ?? null, date: event.date ?? null, isEvent: event.isEvent ?? 1, recurring: event.recurring ?? 0 });
     await saveFallback(db);
   }
   
@@ -596,6 +673,35 @@ export async function createEvent(event: { userId: number; eventTitle?: string |
       console.warn('Failed to sync event to Firebase:', error);
     }
   }
+
+  // After creating an event, invite all accepted friends of the owner by creating RSVPs.
+  // This ensures friends are invited to new events automatically. We avoid creating
+  // duplicate RSVPs by checking for existing RSVP rows for the same event/invitee.
+  (async () => {
+    try {
+      const ownerId = Number(event.userId);
+      if (!ownerId) return;
+      const friends = await getFriendsForUser(ownerId); // returns accepted friends
+      const inviteeIds = new Set<number>();
+      for (const f of friends) {
+        const other = Number(f.userId) === ownerId ? Number(f.friendId) : Number(f.userId);
+        if (!other || other === ownerId) continue;
+        inviteeIds.add(other);
+      }
+      if (inviteeIds.size === 0) return;
+      const existingRsvps = await getRsvpsForEvent(Number(eventId));
+      for (const invitee of Array.from(inviteeIds)) {
+        const already = (existingRsvps || []).find((r: any) => Number(r.inviteRecipientId) === Number(invitee));
+        if (!already) {
+          try {
+            await createRsvp({ eventId: Number(eventId), eventOwnerId: ownerId, inviteRecipientId: invitee, status: 'pending' });
+          } catch (e) { /* ignore per-invite errors */ }
+        }
+      }
+    } catch (e) {
+      // ignore background invite errors
+    }
+  })();
   
   return eventId;
 }
@@ -695,16 +801,23 @@ export async function addNotification(note: { userId: number; notifMsg: string; 
   } else {
     const db = await loadFallback();
     notificationId = nextId(db, 'notifications');
-    db.notifications.push({ notificationId, userId: note.userId, notifMsg: note.notifMsg, notifType: note.notifType ?? null, createdAt: note.timestamp ?? new Date().toISOString() });
+    // Resolve the user's firebaseUid when available so fallback notifications include it
+    const __notifUser = await getUserById(note.userId);
+    const __notifUserFirebase = __notifUser?.firebaseUid ?? null;
+    db.notifications.push({ notificationId, userId: note.userId, userFirebaseUid: __notifUserFirebase, notifMsg: note.notifMsg, notifType: note.notifType ?? null, createdAt: note.timestamp ?? new Date().toISOString() });
     await saveFallback(db);
   }
   
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled() && notificationId) {
     try {
+      // include firebaseUid when available to help backend mapping
+      const __notifUser = await getUserById(note.userId);
+      const __notifUserFirebase = __notifUser?.firebaseUid ?? null;
       await FirebaseSync.syncNotificationToFirebase({ 
         notificationId, 
         userId: note.userId, 
+        userFirebaseUid: __notifUserFirebase,
         notifMsg: note.notifMsg, 
         notifType: note.notifType,
         createdAt: note.timestamp
@@ -776,7 +889,10 @@ export async function setUserPreferences(userId: number, prefs: { theme?: number
     if (idx !== -1) {
       db.user_prefs[idx] = { ...db.user_prefs[idx], ...prefs, updatedAt: new Date().toISOString() };
     } else {
-      db.user_prefs.push({ preferenceId: nextId(db, 'user_prefs'), userId, theme: prefs.theme ?? 0, notificationEnabled: prefs.notificationEnabled ?? 1, colorScheme: prefs.colorScheme ?? 0, updatedAt: new Date().toISOString() });
+      // include user's firebaseUid on preference rows when available
+      const __prefsUser = await getUserById(userId);
+      const __prefsUserFirebase = __prefsUser?.firebaseUid ?? null;
+      db.user_prefs.push({ preferenceId: nextId(db, 'user_prefs'), userId, userFirebaseUid: __prefsUserFirebase, theme: prefs.theme ?? 0, notificationEnabled: prefs.notificationEnabled ?? 1, colorScheme: prefs.colorScheme ?? 0, updatedAt: new Date().toISOString() });
     }
     await saveFallback(db);
   }
@@ -1043,6 +1159,92 @@ export async function runDuplicateCleanup(options?: { dryRun?: boolean; autoMerg
   return { dryRun: false, results };
 }
 
+// One-time migration: backfill firebaseUid fields across fallback/native tables
+export async function backfillFirebaseUids(): Promise<any> {
+  await tryInitNative();
+  const counts: any = { events: 0, rsvps: 0, friends: 0, user_prefs: 0, notifications: 0 };
+
+  if (useNative && nativeDb) {
+    try {
+      const resE: any = await execSqlNative(nativeDb, `UPDATE events SET userFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = events.userId) WHERE userFirebaseUid IS NULL OR userFirebaseUid = '' ;`);
+      counts.events = resE.rowsAffected ?? 0;
+    } catch (e) { /* ignore */ }
+    try {
+      const resF1: any = await execSqlNative(nativeDb, `UPDATE friends SET userFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = friends.userId) WHERE userFirebaseUid IS NULL OR userFirebaseUid = '';`);
+      const resF2: any = await execSqlNative(nativeDb, `UPDATE friends SET friendFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = friends.friendId) WHERE friendFirebaseUid IS NULL OR friendFirebaseUid = '';`);
+      counts.friends = (resF1.rowsAffected ?? 0) + (resF2.rowsAffected ?? 0);
+    } catch (e) { /* ignore */ }
+    try {
+      const resR1: any = await execSqlNative(nativeDb, `UPDATE rsvps SET eventOwnerFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = rsvps.eventOwnerId) WHERE eventOwnerFirebaseUid IS NULL OR eventOwnerFirebaseUid = '';`);
+      const resR2: any = await execSqlNative(nativeDb, `UPDATE rsvps SET inviteRecipientFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = rsvps.inviteRecipientId) WHERE inviteRecipientFirebaseUid IS NULL OR inviteRecipientFirebaseUid = '';`);
+      counts.rsvps = (resR1.rowsAffected ?? 0) + (resR2.rowsAffected ?? 0);
+    } catch (e) { /* ignore */ }
+    try {
+      const resP: any = await execSqlNative(nativeDb, `UPDATE user_prefs SET userFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = user_prefs.userId) WHERE userFirebaseUid IS NULL OR userFirebaseUid = '';`);
+      counts.user_prefs = resP.rowsAffected ?? 0;
+    } catch (e) { /* ignore */ }
+    try {
+      const resN: any = await execSqlNative(nativeDb, `UPDATE notifications SET userFirebaseUid = (SELECT firebaseUid FROM users WHERE users.userId = notifications.userId) WHERE userFirebaseUid IS NULL OR userFirebaseUid = '';`);
+      counts.notifications = resN.rowsAffected ?? 0;
+    } catch (e) { /* ignore */ }
+
+    return counts;
+  }
+
+  // Fallback JS-backed DB
+  const db = await loadFallback();
+  const uidById = new Map<number, string | null>();
+  for (const u of db.users) {
+    if (u && typeof u.userId !== 'undefined') uidById.set(Number(u.userId), u.firebaseUid ?? null);
+  }
+
+  for (const e of db.events) {
+    if ((e.userFirebaseUid === undefined || e.userFirebaseUid === null || e.userFirebaseUid === '') && e.userId) {
+      const v = uidById.get(Number(e.userId)) ?? null;
+      if (v) { e.userFirebaseUid = v; counts.events++; }
+    }
+  }
+
+  for (const r of db.rsvps) {
+    if ((r.eventOwnerFirebaseUid === undefined || r.eventOwnerFirebaseUid === null || r.eventOwnerFirebaseUid === '') && r.eventOwnerId) {
+      const v = uidById.get(Number(r.eventOwnerId)) ?? null;
+      if (v) { r.eventOwnerFirebaseUid = v; counts.rsvps++; }
+    }
+    if ((r.inviteRecipientFirebaseUid === undefined || r.inviteRecipientFirebaseUid === null || r.inviteRecipientFirebaseUid === '') && r.inviteRecipientId) {
+      const v2 = uidById.get(Number(r.inviteRecipientId)) ?? null;
+      if (v2) { r.inviteRecipientFirebaseUid = v2; counts.rsvps++; }
+    }
+  }
+
+  for (const f of db.friends) {
+    if ((f.userFirebaseUid === undefined || f.userFirebaseUid === null || f.userFirebaseUid === '') && f.userId) {
+      const v = uidById.get(Number(f.userId)) ?? null;
+      if (v) { f.userFirebaseUid = v; counts.friends++; }
+    }
+    if ((f.friendFirebaseUid === undefined || f.friendFirebaseUid === null || f.friendFirebaseUid === '') && f.friendId) {
+      const v2 = uidById.get(Number(f.friendId)) ?? null;
+      if (v2) { f.friendFirebaseUid = v2; counts.friends++; }
+    }
+  }
+
+  for (const p of db.user_prefs) {
+    if ((p.userFirebaseUid === undefined || p.userFirebaseUid === null || p.userFirebaseUid === '') && p.userId) {
+      const v = uidById.get(Number(p.userId)) ?? null;
+      if (v) { p.userFirebaseUid = v; counts.user_prefs++; }
+    }
+  }
+
+  for (const n of db.notifications) {
+    if ((n.userFirebaseUid === undefined || n.userFirebaseUid === null || n.userFirebaseUid === '') && n.userId) {
+      const v = uidById.get(Number(n.userId)) ?? null;
+      if (v) { n.userFirebaseUid = v; counts.notifications++; }
+    }
+  }
+
+  await saveFallback(db);
+  return counts;
+}
+
 export default {
   init_db,
   
@@ -1090,6 +1292,7 @@ export default {
   getUserByEmail,
   getUserByFirebaseUid,
   resolveLocalUserId,
+  backfillFirebaseUids,
   getAllUsers,
   // Dedupe helpers
   findUserDuplicates,
