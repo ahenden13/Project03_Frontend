@@ -63,16 +63,17 @@ if (Array.isArray(allUsers)) {
     const existing = await db.getUserById(user.userId);
     if (existing) {
       await db.updateUser(user.userId, {
-        username: user.username,
+        username: user.username || user.email?.split('@')[0] || `user${user.userId}`, // ← ADD FALLBACK
         email: user.email,
         phone_number: user.phoneNumber || user.phone_number || null,
       });
     } else {
       await db.createUser({
-        username: user.username,
+        username: user.username || user.email?.split('@')[0] || `user${user.userId}`, // ← ADD FALLBACK
         email: user.email,
         password: undefined,
         phone_number: user.phoneNumber || user.phone_number || null,
+        // Don't pass firebaseUid for backend users - they don't have one
       });
     }
   }

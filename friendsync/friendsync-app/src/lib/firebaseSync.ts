@@ -68,7 +68,7 @@ export async function syncUserToFirebase(userData: {
     
     const userDataFirebase: any = {
       userId: userData.userId,
-      username: userData.username,
+      username: userData.username || userData.email?.split('@')[0] || 'unknown', // ← FIX: Provide fallback
       email: userData.email,
       phoneNumber: userData.phone_number || null,
       updatedAt: serverTimestamp(),

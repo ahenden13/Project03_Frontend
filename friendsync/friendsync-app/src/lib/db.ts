@@ -279,7 +279,6 @@ export async function getAllUsers(): Promise<any[]> {
   const db = await loadFallback();
   return db.users;
 }
-
 export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null; }) {
   await tryInitNative();
   
@@ -299,10 +298,16 @@ export async function updateUser(userId: number, updates: { username?: string; e
     await saveFallback(db);
   }
   
-  // Sync to Firebase
+  // Sync to Firebase - filter out undefined values
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
-      await FirebaseSync.updateUserInFirebase(userId, updates);
+      // Remove undefined values before passing to Firebase
+      const cleanUpdates: any = {};
+      if (updates.username !== undefined) cleanUpdates.username = updates.username;
+      if (updates.email !== undefined) cleanUpdates.email = updates.email;
+      if (updates.phone_number !== undefined) cleanUpdates.phone_number = updates.phone_number;
+      
+      await FirebaseSync.updateUserInFirebase(userId, cleanUpdates);
     } catch (error) {
       console.warn('Failed to update user in Firebase:', error);
     }
