@@ -1,5 +1,6 @@
 // src/lib/firebaseSync.ts
 // This module handles syncing local database operations to Firebase Firestore
+// Uses Firebase UID as document ID to match useGoogleSignIn behavior
 
 import { 
   collection, 
@@ -8,6 +9,7 @@ import {
   updateDoc, 
   deleteDoc, 
   getDocs, 
+  getDoc,
   query, 
   where,
   serverTimestamp,
@@ -34,7 +36,7 @@ async function getFirestore() {
 }
 
 // ============================================================================
-// USERS
+// USERS - Using Firebase UID as document ID
 // ============================================================================
 
 export async function syncUserToFirebase(userData: {
@@ -43,24 +45,49 @@ export async function syncUserToFirebase(userData: {
   email: string;
   password?: string;
   phone_number?: string | null;
+  firebaseUid?: string; // ← NEW: Firebase UID to use as document ID
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
-    const userRef = doc(firestore, 'users', String(userData.userId));
     
-    await setDoc(userRef, {
+    // Use Firebase UID as document ID if provided, otherwise fall back to email
+    let docId: string;
+    if (userData.firebaseUid) {
+      docId = userData.firebaseUid;
+    } else {
+      // Fallback: use email-based ID if no Firebase UID provided
+      docId = userData.email.toLowerCase().replace(/[^a-z0-9@._-]/g, '_');
+      console.warn('No Firebase UID provided, using email-based ID:', docId);
+    }
+    
+    const userRef = doc(firestore, 'users', docId);
+    
+    // Check if document exists to determine if we need createdAt
+    const docSnap = await getDoc(userRef);
+    const isNewDoc = !docSnap.exists();
+    
+    const userDataFirebase: any = {
       userId: userData.userId,
       username: userData.username,
       email: userData.email,
       phoneNumber: userData.phone_number || null,
-      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }, { merge: true });
+    };
     
-    console.log(`✅ Synced user ${userData.userId} to Firebase`);
+    // Only set createdAt for new documents
+    if (isNewDoc) {
+      userDataFirebase.createdAt = serverTimestamp();
+      console.log(`✨ Creating new user ${userData.email} (uid: ${docId})`);
+    } else {
+      console.log(`📝 Updating existing user ${userData.email} (uid: ${docId})`);
+    }
+    
+    await setDoc(userRef, userDataFirebase, { merge: true });
+    
+    console.log(`✅ Synced user ${userData.email} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing user to Firebase:', error);
-    throw error;
+    // Don't throw - we want local operations to succeed even if Firebase fails
   }
 }
 
@@ -70,11 +97,30 @@ export async function updateUserInFirebase(
     username?: string;
     email?: string;
     phone_number?: string | null;
-  }
+  },
+  firebaseUid?: string // ← NEW: Optional Firebase UID
 ): Promise<void> {
   try {
     const firestore = await getFirestore();
-    const userRef = doc(firestore, 'users', String(userId));
+    
+    let userRef;
+    
+    if (firebaseUid) {
+      // Use Firebase UID directly if provided
+      userRef = doc(firestore, 'users', firebaseUid);
+    } else {
+      // Find the document by userId field
+      const usersRef = collection(firestore, 'users');
+      const userQuery = query(usersRef, where('userId', '==', userId));
+      const userDocs = await getDocs(userQuery);
+      
+      if (userDocs.empty) {
+        console.warn(`No user found with userId ${userId} in Firebase`);
+        return;
+      }
+      
+      userRef = userDocs.docs[0].ref;
+    }
     
     const firestoreUpdates: any = {
       ...updates,
@@ -91,46 +137,49 @@ export async function updateUserInFirebase(
     console.log(`✅ Updated user ${userId} in Firebase`);
   } catch (error) {
     console.error('❌ Error updating user in Firebase:', error);
-    throw error;
   }
 }
 
-export async function deleteUserFromFirebase(userId: number): Promise<void> {
+export async function deleteUserFromFirebase(userId: number, firebaseUid?: string): Promise<void> {
   try {
     const firestore = await getFirestore();
     
-    // Delete user document
-    await deleteDoc(doc(firestore, 'users', String(userId)));
+    if (firebaseUid) {
+      // Use Firebase UID directly if provided
+      await deleteDoc(doc(firestore, 'users', firebaseUid));
+    } else {
+      // Find the user document by userId field
+      const usersRef = collection(firestore, 'users');
+      const userQuery = query(usersRef, where('userId', '==', userId));
+      const userDocs = await getDocs(userQuery);
+      
+      if (userDocs.empty) {
+        console.warn(`No user found with userId ${userId} in Firebase`);
+        return;
+      }
+      
+      // Delete the user document
+      await deleteDoc(userDocs.docs[0].ref);
+    }
     
-    // Clean up related data
-    // Delete user preferences
-    const prefsSnapshot = await getDocs(
-      query(collection(firestore, 'user_prefs'), where('userId', '==', userId))
-    );
-    prefsSnapshot.forEach(async (docSnap) => {
-      await deleteDoc(docSnap.ref);
-    });
+    // Clean up related data in parallel
+    const [prefsSnapshot, eventsSnapshot, friendsSnapshot] = await Promise.all([
+      getDocs(query(collection(firestore, 'user_prefs'), where('userId', '==', userId))),
+      getDocs(query(collection(firestore, 'events'), where('userId', '==', userId))),
+      getDocs(query(collection(firestore, 'friends'), where('userId', '==', userId)))
+    ]);
     
-    // Delete user's events
-    const eventsSnapshot = await getDocs(
-      query(collection(firestore, 'events'), where('userId', '==', userId))
-    );
-    eventsSnapshot.forEach(async (docSnap) => {
-      await deleteDoc(docSnap.ref);
-    });
+    const deletePromises = [
+      ...prefsSnapshot.docs.map(doc => deleteDoc(doc.ref)),
+      ...eventsSnapshot.docs.map(doc => deleteDoc(doc.ref)),
+      ...friendsSnapshot.docs.map(doc => deleteDoc(doc.ref))
+    ];
     
-    // Delete friendships
-    const friendsSnapshot = await getDocs(
-      query(collection(firestore, 'friends'), where('userId', '==', userId))
-    );
-    friendsSnapshot.forEach(async (docSnap) => {
-      await deleteDoc(docSnap.ref);
-    });
+    await Promise.all(deletePromises);
     
     console.log(`✅ Deleted user ${userId} from Firebase`);
   } catch (error) {
     console.error('❌ Error deleting user from Firebase:', error);
-    throw error;
   }
 }
 
@@ -153,7 +202,11 @@ export async function syncEventToFirebase(eventData: {
     const firestore = await getFirestore();
     const eventRef = doc(firestore, 'events', String(eventData.eventId));
     
-    await setDoc(eventRef, {
+    // Check if document exists to determine if we need createdAt
+    const docSnap = await getDoc(eventRef);
+    const isNewDoc = !docSnap.exists();
+    
+    const eventDataFirebase: any = {
       eventId: eventData.eventId,
       userId: eventData.userId,
       eventTitle: eventData.eventTitle || null,
@@ -163,14 +216,18 @@ export async function syncEventToFirebase(eventData: {
       date: eventData.date || null,
       isEvent: eventData.isEvent ?? 1,
       recurring: eventData.recurring ?? 0,
-      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }, { merge: true });
+    };
+    
+    if (isNewDoc) {
+      eventDataFirebase.createdAt = serverTimestamp();
+    }
+    
+    await setDoc(eventRef, eventDataFirebase, { merge: true });
     
     console.log(`✅ Synced event ${eventData.eventId} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing event to Firebase:', error);
-    throw error;
   }
 }
 
@@ -198,7 +255,6 @@ export async function updateEventInFirebase(
     console.log(`✅ Updated event ${eventId} in Firebase`);
   } catch (error) {
     console.error('❌ Error updating event in Firebase:', error);
-    throw error;
   }
 }
 
@@ -213,14 +269,12 @@ export async function deleteEventFromFirebase(eventId: number): Promise<void> {
     const rsvpsSnapshot = await getDocs(
       query(collection(firestore, 'rsvps'), where('eventId', '==', eventId))
     );
-    rsvpsSnapshot.forEach(async (docSnap) => {
-      await deleteDoc(docSnap.ref);
-    });
+    const deletePromises = rsvpsSnapshot.docs.map(doc => deleteDoc(doc.ref));
+    await Promise.all(deletePromises);
     
     console.log(`✅ Deleted event ${eventId} from Firebase`);
   } catch (error) {
     console.error('❌ Error deleting event from Firebase:', error);
-    throw error;
   }
 }
 
@@ -238,19 +292,27 @@ export async function syncFriendRequestToFirebase(friendData: {
     const firestore = await getFirestore();
     const friendRef = doc(firestore, 'friends', String(friendData.friendRowId));
     
-    await setDoc(friendRef, {
+    // Check if document exists to determine if we need createdAt
+    const docSnap = await getDoc(friendRef);
+    const isNewDoc = !docSnap.exists();
+    
+    const friendDataFirebase: any = {
       friendRowId: friendData.friendRowId,
       userId: friendData.userId,
       friendId: friendData.friendId,
       status: friendData.status,
-      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }, { merge: true });
+    };
+    
+    if (isNewDoc) {
+      friendDataFirebase.createdAt = serverTimestamp();
+    }
+    
+    await setDoc(friendRef, friendDataFirebase, { merge: true });
     
     console.log(`✅ Synced friend request ${friendData.friendRowId} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing friend request to Firebase:', error);
-    throw error;
   }
 }
 
@@ -270,7 +332,6 @@ export async function updateFriendRequestInFirebase(
     console.log(`✅ Updated friend request ${friendRowId} in Firebase`);
   } catch (error) {
     console.error('❌ Error updating friend request in Firebase:', error);
-    throw error;
   }
 }
 
@@ -282,7 +343,6 @@ export async function deleteFriendshipFromFirebase(friendRowId: number): Promise
     console.log(`✅ Deleted friendship ${friendRowId} from Firebase`);
   } catch (error) {
     console.error('❌ Error deleting friendship from Firebase:', error);
-    throw error;
   }
 }
 
@@ -301,20 +361,28 @@ export async function syncRsvpToFirebase(rsvpData: {
     const firestore = await getFirestore();
     const rsvpRef = doc(firestore, 'rsvps', String(rsvpData.rsvpId));
     
-    await setDoc(rsvpRef, {
+    // Check if document exists to determine if we need createdAt
+    const docSnap = await getDoc(rsvpRef);
+    const isNewDoc = !docSnap.exists();
+    
+    const rsvpDataFirebase: any = {
       rsvpId: rsvpData.rsvpId,
       eventId: rsvpData.eventId,
       eventOwnerId: rsvpData.eventOwnerId,
       inviteRecipientId: rsvpData.inviteRecipientId,
       status: rsvpData.status,
-      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }, { merge: true });
+    };
+    
+    if (isNewDoc) {
+      rsvpDataFirebase.createdAt = serverTimestamp();
+    }
+    
+    await setDoc(rsvpRef, rsvpDataFirebase, { merge: true });
     
     console.log(`✅ Synced RSVP ${rsvpData.rsvpId} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing RSVP to Firebase:', error);
-    throw error;
   }
 }
 
@@ -334,7 +402,6 @@ export async function updateRsvpInFirebase(
     console.log(`✅ Updated RSVP ${rsvpId} in Firebase`);
   } catch (error) {
     console.error('❌ Error updating RSVP in Firebase:', error);
-    throw error;
   }
 }
 
@@ -346,7 +413,6 @@ export async function deleteRsvpFromFirebase(rsvpId: number): Promise<void> {
     console.log(`✅ Deleted RSVP ${rsvpId} from Firebase`);
   } catch (error) {
     console.error('❌ Error deleting RSVP from Firebase:', error);
-    throw error;
   }
 }
 
@@ -377,7 +443,6 @@ export async function syncNotificationToFirebase(notifData: {
     console.log(`✅ Synced notification ${notifData.notificationId} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing notification to Firebase:', error);
-    throw error;
   }
 }
 
@@ -388,14 +453,12 @@ export async function clearNotificationsInFirebase(userId: number): Promise<void
       query(collection(firestore, 'notifications'), where('userId', '==', userId))
     );
     
-    notificationsSnapshot.forEach(async (docSnap) => {
-      await deleteDoc(docSnap.ref);
-    });
+    const deletePromises = notificationsSnapshot.docs.map(doc => deleteDoc(doc.ref));
+    await Promise.all(deletePromises);
     
     console.log(`✅ Cleared notifications for user ${userId} in Firebase`);
   } catch (error) {
     console.error('❌ Error clearing notifications in Firebase:', error);
-    throw error;
   }
 }
 
@@ -426,7 +489,6 @@ export async function syncUserPreferencesToFirebase(
     console.log(`✅ Synced preferences for user ${userId} to Firebase`);
   } catch (error) {
     console.error('❌ Error syncing preferences to Firebase:', error);
-    throw error;
   }
 }
 
