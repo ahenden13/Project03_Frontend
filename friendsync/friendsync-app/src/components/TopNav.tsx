@@ -23,23 +23,11 @@ export default function TopNav({ navigation }: StackHeaderProps) {
     (async () => {
       try {
         await db.init_db();
-        // Prefer resolving by the currently signed-in Firebase UID when available
+        // Resolve local numeric user id (avoid relying on provider-specific IDs)
         let uidToUse: number | null = null;
         try {
-          if (user && user.uid) {
-            const byUid = await db.getUserByFirebaseUid(String(user.uid));
-            if (byUid && byUid.userId) uidToUse = Number(byUid.userId);
-          }
-        } catch (e) {
-          // ignore lookup errors
-        }
-
-        // If not found via auth UID, fall back to stored mappings
-        if (uidToUse == null) {
-          try {
-            uidToUse = await db.resolveLocalUserId();
-          } catch (e) { /* ignore */ }
-        }
+          uidToUse = await db.resolveLocalUserId();
+        } catch (e) { /* ignore */ }
 
         if (!mounted) return;
         if (uidToUse != null) {

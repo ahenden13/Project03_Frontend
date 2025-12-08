@@ -7,8 +7,9 @@ import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
 
 // added 
-import { auth } from "../lib/firebase";
+// note: do not import firebase auth here; use AuthProvider/ctx instead
 import { useAuth } from "../features/auth/AuthProvider";
+import firebase from "../lib/firebase";
 import db from '../lib/db';
 import { emit, on as onEvent } from '../lib/eventBus';
 import storage from '../lib/storage';
@@ -93,20 +94,9 @@ export default function SettingsScreen() {
     (async () => {
       try {
         await db.init_db();
-        // Prefer resolving by currently signed-in Firebase UID
+        // Resolve local user id (numeric) — avoid relying on firebase UID
         let uid: number | null = null;
-        try {
-          const firebaseUid = authCtx.user?.uid;
-          if (firebaseUid) {
-            const byUid = await db.getUserByFirebaseUid(String(firebaseUid));
-            if (byUid && byUid.userId) uid = Number(byUid.userId);
-          }
-        } catch (e) { /* ignore */ }
-
-        // Fallback to stored mapping if not found via UID
-        if (uid == null) {
-          try { uid = await db.resolveLocalUserId(); } catch (_) { uid = null; }
-        }
+        try { uid = await db.resolveLocalUserId(); } catch (_) { uid = null; }
 
         if (!mounted) return;
         setCurrentUserId(uid);
@@ -187,8 +177,7 @@ export default function SettingsScreen() {
                         // If no local user exists, create one and persist the new userId
                         if (currentUserId == null) {
                           const email = authCtx.user?.email || (await storage.getItem('userEmail')) || '';
-                          const firebaseUid = authCtx.user?.uid || (await storage.getItem('firebaseUid')) || undefined;
-                          const newId = await db.createUser({ username: editingName, email: email, firebaseUid });
+                          const newId = await db.createUser({ username: editingName, email: email });
                           try { await storage.setItem('userId', newId); } catch (e) { /* ignore */ }
                           setCurrentUserId(newId);
                           try { await storage.setItem('userName', editingName); } catch (e) { /* ignore */ }
@@ -262,7 +251,7 @@ export default function SettingsScreen() {
 
         <TouchableOpacity
           onPress={() => {
-            auth.signOut();
+            firebase.auth?.signOut();
             console.log("[Auth] User signed out");
           }}
           activeOpacity={0.8}

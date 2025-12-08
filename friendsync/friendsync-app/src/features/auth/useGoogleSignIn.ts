@@ -9,7 +9,7 @@ import {
 } from "firebase/auth";
 // import { auth, db } from "../../lib/firebase"; // importing db
 import { doc, setDoc } from "firebase/firestore"; // firestone imports
-import { auth, db as firestore } from "../../lib/firebase";
+import firebase from "../../lib/firebase";
 import db from "../../lib/db";
 import * as simpleSync from "../../lib/sync";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -32,22 +32,22 @@ export function useGoogleSignIn() {
     if (Platform.OS === "web") {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
-      await signInWithPopup(auth, provider);
+      await signInWithPopup(firebase.auth, provider);
 
-      const u = auth.currentUser;
+      const u = firebase.auth.currentUser;
       if (u) {
-        try {
-          await setDoc(
-            doc(firestore, "users", u.uid),
-            {
-              uid: u.uid,
-              email: u.email,
-              displayName: u.displayName,
-              photoURL: u.photoURL,
-              lastLogin: new Date(),
-            },
-            { merge: true }
-          );
+          try {
+            await setDoc(
+              doc(firebase.db, "users", u.uid),
+              {
+                uid: u.uid,
+                email: u.email,
+                displayName: u.displayName,
+                photoURL: u.photoURL,
+                lastLogin: new Date(),
+              },
+              { merge: true }
+            );
         } catch (err: any) {
           // If Firestore rules prevent writes, log details but don't fail sign-in.
           // Common cause: Firestore security rules require request.auth.uid == userId
@@ -88,22 +88,23 @@ export function useGoogleSignIn() {
     const res = await WebBrowser.openAuthSessionAsync(authUrl, redirectUri);
     // const res = await AuthSession.startAsync({ authUrl, returnUrl: redirectUri });
     console.log("[Auth] AuthSession result:", res);
- if (res.type === "success" && res.url) { // ← Changed from res.params?.id_token
+
+    if (res.type === "success" && res.url) {
       // Parse the URL to get id_token
       const url = new URL(res.url);
       const hash = url.hash.substring(1); // Remove the '#'
       const params = new URLSearchParams(hash);
       const idToken = params.get('id_token');
 
-      if (idToken) { // ← Added this check
+      if (idToken) {
         const cred = GoogleAuthProvider.credential(idToken);
-        await signInWithCredential(auth, cred);
+        await signInWithCredential(firebase.auth, cred);
 
-        const u = auth.currentUser;
+        const u = firebase.auth.currentUser;
         if (u) {
           try {
             await setDoc(
-              doc(firestore, "users", u.uid), // ← Changed to 'firestore'
+              doc(firebase.db, "users", u.uid),
               {
                 uid: u.uid,
                 email: u.email,
@@ -118,6 +119,7 @@ export function useGoogleSignIn() {
             console.warn('[Auth] setDoc(users/<uid>) failed (native)', err?.code ?? err?.message ?? err);
           }
         }
+
         // Ensure a numeric local DB user exists for this Firebase user (native flow)
         if (u) {
           try {
@@ -129,7 +131,7 @@ export function useGoogleSignIn() {
           }
         }
 
-        await initialSync();   
+        await initialSync();
         return u;
       }
     }
@@ -146,17 +148,17 @@ export function useGoogleSignIn() {
     
     simpleSync.stopAutoSync();
     
-    await signOut(auth);
+    await signOut(firebase.auth);
     
-    await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName', 'firebaseUid']);
+    await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']);
     
     console.log("[Auth] Logged out and sync stopped");
 
   };
 
-  const initialSync = async () => {
+  async function initialSync() {
     try {
-      const user = auth.currentUser;
+      const user = firebase.auth.currentUser;
       if (!user) {
         console.warn("[Auth] No current user, skipping sync initialization");
         return;
@@ -173,8 +175,6 @@ export function useGoogleSignIn() {
 
       // 3. Save auth data to storage
       await AsyncStorage.setItem('authToken', token);
-      // Preserve Firebase UID separately for backend sync
-      await AsyncStorage.setItem('firebaseUid', user.uid);
       await AsyncStorage.setItem('userEmail', user.email || '');
 
       // Ensure a local DB user exists for this signed-in user and store the local numeric id.
@@ -191,10 +191,12 @@ export function useGoogleSignIn() {
 
       // 4. Set up sync -- disabled temporarily
       simpleSync.setAuthToken(token);
-      
-      // Use Firebase UID as userId (your backend should handle this)
-      // If your backend expects a numeric ID, you'll need to map it
-      simpleSync.startAutoSync(user.uid);
+
+      // Start auto-sync using the local numeric user id saved by `ensureLocalUserInDB`.
+      // Pass numeric id if available otherwise resolve later in startAutoSync.
+      const storedLocal = await AsyncStorage.getItem('userId');
+      const localId = storedLocal ? Number(storedLocal) : null;
+      simpleSync.startAutoSync(localId ?? user.uid);
 
       console.log("[Auth] ✓ Sync started successfully");
     } catch (error) {
@@ -202,7 +204,7 @@ export function useGoogleSignIn() {
       // Don't throw - let the user continue even if sync fails
     }
 
-  };
+  }
 
   // Ensure a numeric local DB user exists for the given Firebase user.
   // Returns the numeric local userId or null on failure.
@@ -214,23 +216,20 @@ export function useGoogleSignIn() {
       let localId: number | null = null;
       if (local && local.userId) {
         localId = Number(local.userId);
-        // If the existing local row has no username, populate it from Firebase displayName or email localpart
-        try {
+          // If the existing local row has no username, populate it from Firebase displayName or email localpart
+          try {
           if (!local.username || String(local.username).trim().length === 0) {
             const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
             await db.updateUser(localId, { username: uname });
             try { emit('user:updated', { userId: localId, username: uname }); } catch (_) { /* ignore */ }
           }
-          // Ensure firebaseUid is stored on the local row so future UID-based resolution works
-          if (u.uid && (!local.firebaseUid || String(local.firebaseUid).trim().length === 0)) {
-            try { await db.updateUser(localId, { firebaseUid: String(u.uid) }); } catch (_) { /* ignore */ }
-          }
+          // No longer storing provider-specific UID locally — rely on numeric local userId.
         } catch (e) {
           // ignore update errors
         }
       } else {
         const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
-        localId = await db.createUser({ username: uname, email: u.email || '', firebaseUid: u.uid });
+        localId = await db.createUser({ username: uname, email: u.email || '' });
       }
       if (localId != null) {
         await AsyncStorage.setItem('userId', String(localId));
@@ -242,8 +241,7 @@ export function useGoogleSignIn() {
         } catch (e) {
           // ignore
         }
-        // persist firebase uid too
-        if (u.uid) await AsyncStorage.setItem('firebaseUid', String(u.uid));
+        // do not persist provider-specific UID locally
       }
       return localId;
     } catch (err) {

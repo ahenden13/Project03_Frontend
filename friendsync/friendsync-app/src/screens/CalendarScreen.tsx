@@ -577,9 +577,9 @@ export default function CalendarScreen() {
           }
 
           // Owner name: try multiple strategies to resolve a human-friendly name.
-          // Some records may store the owner as a numeric local id, a Firebase UID
-          // string, or (rarely) an email. Try numeric id first, then firebaseUid,
-          // then email. Fall back to showing the raw id to avoid empty UI.
+          // Some records may store the owner as a numeric local id, a provider-specific id
+          // string, or (rarely) an email. Try numeric id first, then email fallback.
+          // Fall back to showing the raw id to avoid empty UI.
           if (e.userId || e.eventOwnerId || e.ownerId) {
             const rawOwner = e.userId ?? e.eventOwnerId ?? e.ownerId;
             try {
@@ -589,14 +589,11 @@ export default function CalendarScreen() {
               if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
                 try { resolved = await db.getUserById(asNum); } catch (_) { resolved = null; }
               }
-              // If numeric lookup failed, try firebase UID lookup
-              if (!resolved) {
-                try { resolved = await db.getUserByFirebaseUid(String(rawOwner)); } catch (_) { resolved = null; }
-              }
-              // If still unresolved, try email
+              // If numeric lookup failed, try email lookup (do not rely on firebase UID)
               if (!resolved && rawOwner && String(rawOwner).includes('@')) {
                 try { resolved = await db.getUserByEmail(String(rawOwner)); } catch (_) { resolved = null; }
               }
+              // If still unresolved, fall back to raw owner value
               if (mounted) setOwnerName(resolved?.username ?? resolved?.email ?? String(rawOwner));
             } catch (_) {
               if (mounted) setOwnerName(String(e.userId ?? e.eventOwnerId ?? e.ownerId));

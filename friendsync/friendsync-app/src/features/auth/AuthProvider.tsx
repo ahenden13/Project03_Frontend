@@ -1,6 +1,6 @@
 import React from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { auth } from "../../lib/firebase";
+import firebase from "../../lib/firebase";
 
 type Ctx = { user: User | null; ready: boolean };
 const AuthContext = React.createContext<Ctx>({ user: null, ready: false });
@@ -11,7 +11,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = React.useState(false);
 
   React.useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => { setUser(u); setReady(true); });
+    const unsub = onAuthStateChanged(firebase.auth, (u) => { setUser(u); setReady(true); });
     return unsub;
   }, []);
 

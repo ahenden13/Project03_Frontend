@@ -8,8 +8,8 @@ import db from './src/lib/db';
 
 
 // added: 
-import { auth } from "./src/lib/firebase"; // added these imports for auth listener - justin
-import { onAuthStateChanged } from "firebase/auth"; // added these imports for auth listener - justin
+import firebase from "./src/lib/firebase"; // unified firebase helper
+import { onAuthStateChanged } from "firebase/auth"; // auth listener
 import { AuthProvider } from './src/features/auth/AuthProvider';
 import { getApp } from "firebase/app";
 
@@ -79,10 +79,10 @@ export default function App() {
   // sanity check auth state change - justin
   useEffect(() => {
     // Verify Firebase initialized properly
-    console.log('Firebase app name:', auth.app.name);
+    console.log('Firebase app name:', firebase.auth?.app?.name);
 
     // Listenenr for auth state changes
-    const unsub = onAuthStateChanged(auth, (user) => {
+    const unsub = onAuthStateChanged(firebase.auth, (user) => {
       if (user) {
         console.log(`Auth state: signed in as ${user.email ?? user.uid}`);
       } else {
