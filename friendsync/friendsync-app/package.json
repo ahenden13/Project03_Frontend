@@ -8,6 +8,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "build": "expo export",
     "start:deploy": "serve -s dist",
     "heroku-postbuild": "npm run build"
@@ -53,12 +55,6 @@
     "jest-expo": "~54.0.0",
     "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2"
-  },
-  "jest": {
-    "preset": "jest-expo",
-    "setupFilesAfterEnv": [
-      "<rootDir>/jest.setup.ts"
-    ]
   },
   "private": true
 }
