@@ -8,6 +8,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Calendar } from "react-native-calendars"; // Calendar library
 import { useTheme } from "../lib/ThemeProvider";
 import db from "../lib/db";
+import InviteFriendsModal from '../components/InviteFriendsModal';
 
 /**
  * CalendarScreen
@@ -136,6 +137,9 @@ export default function CalendarScreen() {
   // Modal state: null = closed, otherwise 'event' | 'list' | 'create'
   const [modalType, setModalType] = useState<null | 'event' | 'list' | 'create'>(null);
   const [modalPayload, setModalPayload] = useState<any>(null);
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [inviteEventId, setInviteEventId] = useState<number | null>(null);
+  const [inviteEventOwnerId, setInviteEventOwnerId] = useState<number | null>(null);
   // subtract small gaps/padding when computing cell width
   // ScrollView padding values (top and bottom) that affect available space
   const scrollPaddingTop = t.space?.lg ?? 0;
@@ -582,22 +586,37 @@ export default function CalendarScreen() {
           // Fall back to showing the raw id to avoid empty UI.
           if (e.userId || e.eventOwnerId || e.ownerId) {
             const rawOwner = e.userId ?? e.eventOwnerId ?? e.ownerId;
-            try {
-              let resolved: any = null;
-              // Try numeric local id when possible
-              const asNum = Number(rawOwner);
-              if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
-                try { resolved = await db.getUserById(asNum); } catch (_) { resolved = null; }
+              try {
+                let resolved: any = null;
+                // Try numeric local id when possible
+                const asNum = Number(rawOwner);
+                if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
+                  try { resolved = await db.getUserById(asNum); } catch (_) { resolved = null; }
+                }
+                // If numeric lookup failed, try email lookup
+                if (!resolved && rawOwner && String(rawOwner).includes('@')) {
+                  try { resolved = await db.getUserByEmail(String(rawOwner)); } catch (_) { resolved = null; }
+                }
+                // If still unresolved, try provider UID lookup
+                if (!resolved && rawOwner && typeof rawOwner === 'string') {
+                  try { resolved = await db.getUserByFirebaseUid(String(rawOwner)); } catch (_) { resolved = null; }
+                }
+                // If still unresolved, fall back to raw owner value
+                if (mounted) setOwnerName(resolved?.username ?? resolved?.email ?? String(rawOwner));
+                // Fallback: if we still have a numeric id string, try scanning all users for a match
+                const initial = resolved?.username ?? resolved?.email ?? String(rawOwner);
+                if (mounted && typeof initial === 'string' && /^\d+$/.test(initial)) {
+                  try {
+                    const all = await db.getAllUsers();
+                    const byId = all.find((u: any) => Number(u.userId) === Number(initial));
+                    const byFirebase = all.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(initial));
+                    const found = byId || byFirebase;
+                    if (found) setOwnerName(found.username ?? found.email ?? String(initial));
+                  } catch (_) { /* ignore */ }
+                }
+              } catch (_) {
+                if (mounted) setOwnerName(String(e.userId ?? e.eventOwnerId ?? e.ownerId));
               }
-              // If numeric lookup failed, try email lookup (do not rely on firebase UID)
-              if (!resolved && rawOwner && String(rawOwner).includes('@')) {
-                try { resolved = await db.getUserByEmail(String(rawOwner)); } catch (_) { resolved = null; }
-              }
-              // If still unresolved, fall back to raw owner value
-              if (mounted) setOwnerName(resolved?.username ?? resolved?.email ?? String(rawOwner));
-            } catch (_) {
-              if (mounted) setOwnerName(String(e.userId ?? e.eventOwnerId ?? e.ownerId));
-            }
           } else {
             if (mounted) setOwnerName(null);
           }
@@ -661,6 +680,15 @@ export default function CalendarScreen() {
                 // Carry along the return-to info so after editing we can go back if desired
                 setModalPayload({ event: e, date: derivedDate, editMode: true, _returnTo: (e as any)._returnTo });
                 setModalType('create');
+              }} /> : null}
+              {/* Invite Friends button (available for any event that has an id) */}
+              {e.eventId ? <View style={{ width: 8 }} /> : null}
+              {e.eventId ? <Button title="Invite Friends" onPress={() => {
+                // close the event detail modal first so the Invite modal appears on top
+                try { closeModal(); } catch (_) { /* ignore */ }
+                setInviteEventId(e.eventId);
+                setInviteEventOwnerId(e.userId ?? null);
+                setInviteModalVisible(true);
               }} /> : null}
             </View>
           </View>
@@ -947,9 +975,39 @@ export default function CalendarScreen() {
             </ScrollView>
 
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', padding: 12, borderTopWidth: 1, borderTopColor: '#eee' }}>
-              <TouchableOpacity onPress={save} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: t.color.accent, borderRadius: 8 }}>
-                <Text style={{ color: '#fff' }}>Save</Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <TouchableOpacity onPress={async () => {
+                  // create event if necessary then open invite modal (keep create modal open)
+                  try {
+                    const pad = (n: number) => String(n).padStart(2, '0');
+                    const isoStart = `${modalPayload?.date}T${pad(startHour)}:${pad(startMinute)}:00`;
+                    const isoEnd = `${modalPayload?.date}T${pad(endHour)}:${pad(endMinute)}:00`;
+                    if (!currentUserId) return;
+                    // create if editing not set
+                    if (!modalPayload?.editMode) {
+                      const newId = await db.createEvent({ userId: currentUserId, eventTitle: title || 'Event', description: description || undefined, startTime: isoStart, endTime: isoEnd, date: modalPayload?.date, isEvent: isEventToggle ? 1 : 0, recurring: recurringCode });
+                      setInviteEventId(newId);
+                      setInviteEventOwnerId(currentUserId);
+                      setInviteModalVisible(true);
+                      return;
+                    }
+                    // editing mode: ensure eventId present
+                    const evId = modalPayload?.event?.eventId;
+                    if (evId) {
+                      setInviteEventId(evId);
+                      setInviteEventOwnerId(modalPayload?.event?.userId ?? null);
+                      setInviteModalVisible(true);
+                    }
+                  } catch (e) {
+                    console.warn('Calendar: failed to create event for invite', e);
+                  }
+                }} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: '#3b82f6', borderRadius: 8, marginRight: 8 }}>
+                  <Text style={{ color: '#fff' }}>Invite Friends</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={save} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: t.color.accent, borderRadius: 8 }}>
+                  <Text style={{ color: '#fff' }}>Save</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </View>
@@ -1186,6 +1244,41 @@ export default function CalendarScreen() {
       <EventDetailModal />
       <DayListModal />
       <CreateEventModal />
+      <InviteFriendsModal
+        visible={inviteModalVisible}
+        onClose={() => {
+          setInviteModalVisible(false);
+          (async () => {
+            try {
+              const eid = inviteEventId ?? undefined;
+              if (!eid) return;
+              // Attempt to locate the raw event record by owner first
+              if (inviteEventOwnerId) {
+                const raw = await db.getEventsForUser(inviteEventOwnerId);
+                const r = (raw || []).find((x: any) => Number(x.eventId) === Number(eid));
+                if (r) {
+                  // reopen the calendar event detail modal with the same payload shape used elsewhere
+                  setModalPayload(r);
+                  setModalType('event');
+                  return;
+                }
+              }
+              // as a last resort, try searching aggregated event arrays
+              const all = [...myEvents, ...(friendAvailability || [])];
+              const match = all.find((it: any) => Number(it.eventId) === Number(eid));
+              if (match) {
+                setModalPayload(match);
+                setModalType('event');
+              }
+            } catch (e) {
+              console.warn('Calendar: failed to reopen event detail after invite modal close', e);
+            }
+          })();
+        }}
+        eventId={inviteEventId ?? 0}
+        currentUserId={currentUserId ?? 0}
+        eventOwnerId={inviteEventOwnerId}
+      />
     </ScrollView>
   );
 }

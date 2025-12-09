@@ -6,6 +6,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import db from '../lib/db';
 import Screen from '../components/ScreenTmp';
+import InviteFriendsModal from '../components/InviteFriendsModal';
 import { useTheme } from '../lib/ThemeProvider';
 import RowItem from '../components/RowItem';
 import DetailModal from '../components/DetailModal';
@@ -29,6 +30,7 @@ export default function EventsScreen() {
   const [ceEndHour, setCeEndHour] = useState<number>(10);
   const [ceEndMinute, setCeEndMinute] = useState<number>(0);
   const [ceDescription, setCeDescription] = useState('');
+  const [ceCreatedEventId, setCeCreatedEventId] = useState<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -166,10 +168,17 @@ export default function EventsScreen() {
       const dayIso = date.toISOString().slice(0,10);
       const isoStart = `${dayIso}T${pad(ceStartHour)}:${pad(ceStartMinute)}:00`;
       const isoEnd = `${dayIso}T${pad(ceEndHour)}:${pad(ceEndMinute)}:00`;
-      await db.createEvent({ userId: currentUserId, eventTitle: ceTitle || 'Event', description: ceDescription || undefined, startTime: isoStart, endTime: isoEnd, date: dayIso, isEvent: 1, recurring: 0 });
+      if (ceCreatedEventId) {
+        await db.updateEvent(ceCreatedEventId, { eventTitle: ceTitle || 'Event', description: ceDescription || undefined, startTime: isoStart, endTime: isoEnd, date: dayIso });
+      } else {
+        const newId = await db.createEvent({ userId: currentUserId, eventTitle: ceTitle || 'Event', description: ceDescription || undefined, startTime: isoStart, endTime: isoEnd, date: dayIso, isEvent: 1, recurring: 0 });
+        // mark created id so Save becomes an update and invite can reference it
+        setCeCreatedEventId(newId);
+      }
       setCreateVisible(false);
       // reset fields
       setCeTitle(''); setCeDescription(''); setCeStartHour(9); setCeStartMinute(0); setCeEndHour(10); setCeEndMinute(0);
+      setCeCreatedEventId(null);
       // refresh list
       setRefreshFlag(f => f + 1);
     } catch (err) {
@@ -182,6 +191,9 @@ export default function EventsScreen() {
   const [rsvpModalVisible, setRsvpModalVisible] = useState(false);
   const [rsvpTarget, setRsvpTarget] = useState<EventRow | null>(null);
   const [selectedBody, setSelectedBody] = useState<string | null>(null);
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [inviteEventId, setInviteEventId] = useState<number | null>(null);
+  const [inviteEventOwnerId, setInviteEventOwnerId] = useState<number | null>(null);
 
   // Open details for an event row. For friend events, fetch RSVP list and
   // display a concise list of who else has responded. For own events, show
@@ -222,6 +234,15 @@ export default function EventsScreen() {
       setSelectedBody(item ? (item.desc ?? '') : null);
     }
     setSelected(item);
+  }
+
+  async function openInviteForEvent(eventId?: number, ownerId?: number | null) {
+    if (!eventId) return;
+    // close the detail modal (selected) so the invite modal isn't covered
+    try { setSelected(null); setSelectedBody(null); } catch (_) { /* ignore */ }
+    setInviteEventId(eventId);
+    setInviteEventOwnerId(ownerId ?? null);
+    setInviteModalVisible(true);
   }
 
   return (
@@ -299,6 +320,13 @@ export default function EventsScreen() {
           selected?.desc ? `\n${selected.desc}` : '',
         ].filter(Boolean).join('\n')}
         onClose={() => { setSelected(null); setSelectedBody(null); }}
+        actions={(
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+            <TouchableOpacity onPress={() => openInviteForEvent(selected?.eventIdNum ?? undefined, selected?.ownerId ?? undefined)} style={{ paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#3b82f6', borderRadius: 8 }}>
+              <Text style={{ color: '#fff', fontWeight: '700' }}>Invite Friends</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       />
 
       <Modal visible={createVisible} transparent animationType="slide" onRequestClose={() => setCreateVisible(false)}>
@@ -370,12 +398,71 @@ export default function EventsScreen() {
               </View>
 
               <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 }}>
-                <Button title="Save" onPress={saveCreateEvent} />
+                <View style={{ flexDirection: 'row' }}>
+                  <TouchableOpacity onPress={async () => {
+                    // create the event if necessary (but keep create modal open) then open invite modal
+                    if (!currentUserId) return;
+                    try {
+                      const pad = (n: number) => String(n).padStart(2, '0');
+                      const date = new Date();
+                      const dayIso = date.toISOString().slice(0,10);
+                      const isoStart = `${dayIso}T${pad(ceStartHour)}:${pad(ceStartMinute)}:00`;
+                      const isoEnd = `${dayIso}T${pad(ceEndHour)}:${pad(ceEndMinute)}:00`;
+                      let evId = ceCreatedEventId;
+                      if (!evId) {
+                        evId = await db.createEvent({ userId: currentUserId, eventTitle: ceTitle || 'Event', description: ceDescription || undefined, startTime: isoStart, endTime: isoEnd, date: dayIso, isEvent: 1, recurring: 0 });
+                        setCeCreatedEventId(evId);
+                      }
+                      openInviteForEvent(evId, currentUserId);
+                    } catch (e) {
+                      console.warn('Failed to create event for invite', e);
+                    }
+                  }} style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: t.color.accent, marginRight: 8 }}>
+                    <Text style={{ color: '#fff', fontWeight: '700' }}>Invite Friends</Text>
+                  </TouchableOpacity>
+                  <Button title="Save" onPress={saveCreateEvent} />
+                </View>
               </View>
             </View>
           </View>
         </View>
       </Modal>
+
+      <InviteFriendsModal
+        visible={inviteModalVisible}
+        onClose={() => {
+          setInviteModalVisible(false);
+          (async () => {
+            try {
+              // Try to find the event row from current list first
+              const eid = inviteEventId ?? undefined;
+              if (!eid) return;
+              const found = events.find(e => Number(e.eventIdNum) === Number(eid));
+              if (found) {
+                await openDetails(found);
+                return;
+              }
+              // fallback: fetch from owner events if owner known
+              if (inviteEventOwnerId) {
+                const raw = await db.getEventsForUser(inviteEventOwnerId);
+                const r = (raw || []).find((x: any) => Number(x.eventId) === Number(eid));
+                if (r) {
+                  const s = r.startTime ? new Date(r.startTime) : null;
+                  const en = r.endTime ? new Date(r.endTime) : null;
+                  const when = s ? (en ? `${s.toLocaleString([], { month: 'short', day: 'numeric' })} ${s.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${en.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : `${s.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`) : '';
+                  const row: EventRow = { id: String(r.eventId), title: r.eventTitle ?? 'Event', when, where: r.location ?? undefined, desc: r.description ?? undefined, eventIdNum: r.eventId, ownerId: r.userId };
+                  await openDetails(row);
+                }
+              }
+            } catch (e) {
+              console.warn('EventsScreen: failed to reopen event details', e);
+            }
+          })();
+        }}
+        eventId={inviteEventId ?? 0}
+        currentUserId={currentUserId ?? 0}
+        eventOwnerId={inviteEventOwnerId}
+      />
 
       {/* RSVP modal for friend events */}
       <Modal visible={rsvpModalVisible} transparent animationType="fade" onRequestClose={() => setRsvpModalVisible(false)}>

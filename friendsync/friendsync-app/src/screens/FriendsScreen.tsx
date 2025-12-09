@@ -47,14 +47,23 @@ export default function FriendsScreen() {
           return;
         }
 
-        // get accepted friend ids and load their user records
-        const fids = await db.getFriendsForUser(resolvedUserId);
+        // get friend rows (accepted + pending) referencing this user and load counterpart user records
+        const friendRows = await db.getFriendRowsForUser(resolvedUserId);
         const rows: FriendRow[] = [];
-        for (const fid of fids || []) {
+        for (const fr of friendRows || []) {
           try {
-            const u = await db.getUserById(fid);
-            if (!u) continue;
-            rows.push({ id: String(u.userId), name: u.username ?? u.email ?? `user ${u.userId}`, status: undefined, about: u.email ?? undefined });
+            // Determine the other party's id
+            const otherId = Number(fr.userId) === Number(resolvedUserId) ? Number(fr.friendId) : Number(fr.userId);
+            const u = await db.getUserById(otherId);
+            const displayName = u ? (u.username ?? u.email ?? `user ${otherId}`) : `user ${otherId}`;
+            // Status: accepted / pending (incoming/outgoing)
+            let statusLabel: string | undefined = undefined;
+            if (fr.status === 'accepted') statusLabel = 'Friend';
+            else if (fr.status === 'pending') {
+              if (Number(fr.friendId) === Number(resolvedUserId)) statusLabel = 'Request (incoming)';
+              else statusLabel = 'Request (outgoing)';
+            }
+            rows.push({ id: String(otherId), name: displayName, status: statusLabel, about: u?.email ?? undefined });
           } catch (e) {
             // ignore individual fetch failures
           }

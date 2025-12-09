@@ -575,6 +575,17 @@ export async function getFriendsForUser(userId: number): Promise<any[]> {
   return db.friends.filter((f: any) => (f.userId === userId || f.friendId === userId) && f.status === 'accepted');
 }
 
+// Return all friend rows referencing the given user (accepted or pending)
+export async function getFriendRowsForUser(userId: number): Promise<any[]> {
+  await tryInitNative();
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE userId = ? OR friendId = ?;', [userId, userId]);
+    return res.rows._array as any[];
+  }
+  const db = await loadFallback();
+  return db.friends.filter((f: any) => Number(f.userId) === Number(userId) || Number(f.friendId) === Number(userId));
+}
+
 export async function removeFriend(friendRowId: number) {
   await tryInitNative();
   
@@ -1222,6 +1233,7 @@ export default {
   respondFriendRequest,
   getFriendRequestsForUser,
   getFriendsForUser,
+  getFriendRowsForUser,
   removeFriend,
 
   // Events

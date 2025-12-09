@@ -8,9 +8,10 @@ type Props = {
   title: string;
   body?: string;
   onClose: () => void;
+  actions?: React.ReactNode;
 };
 
-export default function DetailModal({ visible, title, body, onClose }: Props) {
+export default function DetailModal({ visible, title, body, onClose, actions }: Props) {
   const t = useTheme();
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -41,6 +42,8 @@ export default function DetailModal({ visible, title, body, onClose }: Props) {
 
           <Text style={{ color: '#fff', fontSize: 20, fontWeight: '700' }}>{title}</Text>
           {!!body && <Text style={{ color: t.color.text, marginTop: t.space.sm }}>{body}</Text>}
+          {/** Optional action buttons rendered below body (e.g., Invite Friends) */}
+          {actions ? <View style={{ marginTop: t.space.md }}>{actions}</View> : null}
         </View>
       </View>
     </Modal>
