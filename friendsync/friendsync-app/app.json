@@ -7,17 +7,21 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.friendsync.app"
     },
+
     "android": {
       "package": "com.friendsync.app",
+      "scheme": "com.friendsync.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -25,25 +29,22 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
-    "experiments": {
-      "typedRoutes": false
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    },
-    "platforms": [
-      "ios",
-      "android",
-      "web"
-    ],
+
+    "experiments": { "typedRoutes": false },
+
+    "web": { "favicon": "./assets/favicon.png" },
+
+    "platforms": ["ios", "android", "web"],
 
     "extra": {
       "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "1013334906995-8mbvl4rhu9jh4haool5jpup9qng9q7ph.apps.googleusercontent.com",
-      "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "1013334906995-bovv18flvahmc7drh8chokfd6sldprt0.apps.googleusercontent.com"
+      "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "1013334906995-bovv18flvahmc7drh8chokfd6sldprt0.apps.googleusercontent.com",
+
+      "EXPO_PUBLIC_GITHUB_CLIENT_ID": "Ov23liwCKvoC5jsU19rU",
+
+      "EXPO_PUBLIC_GITHUB_REDIRECT_URI": "com.friendsync.app://redirect"
     },
 
-    "plugins": [
-      "expo-web-browser"
-    ]
+    "plugins": ["expo-web-browser"]
   }
 }
