@@ -276,6 +276,11 @@ export async function createUser(user: {
       console.warn('Failed to sync user to Firebase:', error);
     }
   }
+
+  // Emit outbound event for backend sync so server-side API also gets the
+  // canonical numeric `userId` and `username`. Sync layer will listen for
+  // this event and POST to the REST API when an auth token is available.
+  try { emit('outbound:userCreated', { userId, username: user.username ?? '', email: user.email ?? '', firebase_uid: user.firebase_uid ?? '' }); } catch (_) { }
   
   return userId;
 }
@@ -436,6 +441,9 @@ export async function updateUser(userId: number, updates: { username?: string; e
       console.warn('Failed to update user in Firebase:', error);
     }
   }
+
+  // Emit outbound event so sync layer can notify backend API of the update
+  try { emit('outbound:userUpdated', { userId, updates }); } catch (_) { }
 }
 
 export async function deleteUser(userId: number) {
@@ -457,6 +465,9 @@ export async function deleteUser(userId: number) {
       console.warn('Failed to delete user from Firebase:', error);
     }
   }
+
+  // Emit outbound event so sync layer can notify backend API
+  try { emit('outbound:userDeleted', { userId }); } catch (_) { }
 }
 
 // ============================================================================

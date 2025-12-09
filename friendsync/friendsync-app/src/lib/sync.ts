@@ -42,6 +42,59 @@ on('outbound:friendCreated', async (payload: any) => {
   } catch (e) { console.warn('sync: failed pushing friend to backend', e); }
 });
 
+// When a new local user is created, push to backend so server has the
+// canonical numeric `userId` and username mapping (use authToken if present)
+on('outbound:userCreated', async (payload: any) => {
+  try {
+    const body = { userId: payload.userId, username: payload.username, email: payload.email, firebase_uid: payload.firebase_uid };
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    await fetch(`${API_URL}/api/users`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
+    console.log('sync: pushed user to backend', body);
+  } catch (e) { console.warn('sync: failed pushing user to backend', e); }
+});
+
+// Listen for user updates and push changes to backend
+on('outbound:userUpdated', async (payload: any) => {
+  try {
+    const updates = payload.updates || {};
+    const body: any = { userId: payload.userId };
+    // Normalize known fields only to avoid sending arbitrary shapes
+    if (updates.username !== undefined && updates.username !== null) body.username = updates.username;
+    // prefer email field
+    if (updates.email !== undefined && updates.email !== null) body.email = updates.email;
+    // support both phone_number and phoneNumber
+    if (updates.phone_number !== undefined && updates.phone_number !== null) body.phone_number = updates.phone_number;
+    if (updates.phoneNumber !== undefined && updates.phoneNumber !== null) body.phone_number = updates.phoneNumber;
+    // support firebase uid variants
+    if (updates.firebase_uid !== undefined && updates.firebase_uid !== null) body.firebase_uid = updates.firebase_uid;
+    if (updates.firebaseUid !== undefined && updates.firebaseUid !== null) body.firebase_uid = updates.firebaseUid;
+    // fallback: if displayName provided and username not provided, use it
+    if (!body.username && updates.displayName) body.username = updates.displayName;
+
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    // Send only if we have more than just userId
+    const hasPayload = Object.keys(body).length > 1;
+    if (hasPayload) {
+      await fetch(`${API_URL}/api/users/${payload.userId}`, { method: 'PUT', headers, body: JSON.stringify(body) }).catch(() => null);
+      console.log('sync: pushed user update to backend', body);
+    } else {
+      console.log('sync: outbound:userUpdated had no normalized fields to push for user', payload.userId);
+    }
+  } catch (e) { console.warn('sync: failed pushing user update to backend', e); }
+});
+
+// Listen for deleted local users and forward to backend
+on('outbound:userDeleted', async (payload: any) => {
+  try {
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    await fetch(`${API_URL}/api/users/${payload.userId}`, { method: 'DELETE', headers }).catch(() => null);
+    console.log('sync: deleted user on backend', payload.userId);
+  } catch (e) { console.warn('sync: failed deleting user on backend', e); }
+});
+
 on('outbound:rsvpCreated', async (payload: any) => {
   try {
     const body = { rsvpId: payload.rsvpId, eventId: payload.eventId, eventOwnerId: payload.eventOwnerId, inviteRecipientId: payload.inviteRecipientId, status: payload.status };

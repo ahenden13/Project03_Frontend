@@ -56,35 +56,36 @@ export function useGoogleSignIn() {
 
       const u = fb.auth.currentUser;
       if (u) {
-          try {
-            await setDoc(
-              doc(fb.db, "users", u.uid),
-              {
-                uid: u.uid,
-                email: u.email,
-                displayName: u.displayName,
-                photoURL: u.photoURL,
-                lastLogin: new Date(),
-              },
-              { merge: true }
-            );
-        } catch (err: any) {
-          // If Firestore rules prevent writes, log details but don't fail sign-in.
-          // Common cause: Firestore security rules require request.auth.uid == userId
-          // or admin-only writes. Inspect console logs and Firestore rules in Firebase Console.
-          // eslint-disable-next-line no-console
-          console.warn('[Auth] setDoc(users/<uid>) failed', err?.code ?? err?.message ?? err);
-        }
-      }
-
-      // Ensure a numeric local DB user exists for this Firebase user
-      if (u) {
         try {
-          await ensureLocalUserInDB(u);
-        } catch (err) {
-          // non-fatal
-          // eslint-disable-next-line no-console
-          console.warn('[Auth] ensureLocalUserInDB failed (web)', err);
+          // Ensure a numeric local DB user exists for this Firebase user first
+          const localId = await ensureLocalUserInDB(u).catch((e) => {
+            console.warn('[Auth] ensureLocalUserInDB failed (web)', e); return null;
+          });
+
+          // Read local username if available
+          let localName: string | undefined = undefined;
+          if (localId) {
+            try {
+              const lu = await db.getUserById(localId);
+              if (lu && lu.username) localName = lu.username;
+            } catch (_) { /* ignore */ }
+          }
+
+          await setDoc(
+            doc(fb.db, "users", u.uid),
+            {
+              uid: u.uid,
+              userId: localId ?? null,
+              username: localName ?? (u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : undefined),
+              email: u.email,
+              displayName: u.displayName,
+              photoURL: u.photoURL,
+              lastLogin: new Date(),
+            },
+            { merge: true }
+          );
+        } catch (err: any) {
+          console.warn('[Auth] setDoc(users/<uid>) failed', err?.code ?? err?.message ?? err);
         }
       }
 
@@ -128,10 +129,19 @@ export function useGoogleSignIn() {
         const u = fb.auth.currentUser;
         if (u) {
           try {
+            // Ensure numeric local user exists and capture id/name
+            const localId = await ensureLocalUserInDB(u).catch((e) => { console.warn('[Auth] ensureLocalUserInDB failed (native)', e); return null; });
+            let localName: string | undefined = undefined;
+            if (localId) {
+              try { const lu = await db.getUserById(localId); if (lu && lu.username) localName = lu.username; } catch (_) { /* ignore */ }
+            }
+
             await setDoc(
               doc(fb.db, "users", u.uid),
               {
                 uid: u.uid,
+                userId: localId ?? null,
+                username: localName ?? (u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : undefined),
                 email: u.email,
                 displayName: u.displayName,
                 photoURL: u.photoURL,
@@ -140,19 +150,7 @@ export function useGoogleSignIn() {
               { merge: true }
             );
           } catch (err: any) {
-            // eslint-disable-next-line no-console
             console.warn('[Auth] setDoc(users/<uid>) failed (native)', err?.code ?? err?.message ?? err);
-          }
-        }
-
-        // Ensure a numeric local DB user exists for this Firebase user (native flow)
-        if (u) {
-          try {
-            await ensureLocalUserInDB(u);
-          } catch (err) {
-            // non-fatal
-            // eslint-disable-next-line no-console
-            console.warn('[Auth] ensureLocalUserInDB failed (native)', err);
           }
         }
 
