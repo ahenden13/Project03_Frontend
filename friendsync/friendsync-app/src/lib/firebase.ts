@@ -1,14 +1,23 @@
 // Small platform-agnostic re-export for Firebase helpers
 import { Platform } from 'react-native';
 
-let mod: any;
-if (Platform.OS === 'web') {
-  mod = require('./firebase.web');
-} else {
-  mod = require('./firebase.native');
+let resolved: any = null;
+function resolvePlatformModule(): any {
+  if (resolved) return resolved;
+  try {
+    if (Platform.OS === 'web') resolved = require('./firebase.web');
+    else resolved = require('./firebase.native');
+  } catch (e) {
+    // best-effort: leave resolved as empty object
+    resolved = {};
+    // don't rethrow — callers will guard for missing auth/db
+  }
+  return resolved;
 }
 
-export const auth = (mod && mod.auth) ? mod.auth : undefined;
-export const db = (mod && mod.db) ? mod.db : undefined;
+const firebaseProxy = {
+  get auth() { return resolvePlatformModule().auth; },
+  get db() { return resolvePlatformModule().db; }
+};
 
-export default { auth, db };
+export default firebaseProxy;

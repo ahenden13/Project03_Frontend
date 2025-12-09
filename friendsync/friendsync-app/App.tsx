@@ -78,16 +78,15 @@ export default function App() {
 
   // sanity check auth state change - justin
   useEffect(() => {
-    // Verify Firebase initialized properly
-    console.log('Firebase app name:', firebase.auth?.app?.name);
+    // Verify Firebase initialized properly (guarded)
+    try { console.log('Firebase app name:', firebase?.auth?.app?.name); } catch (e) { /* ignore */ }
 
-    // Listenenr for auth state changes
+    // Only attach listener when auth instance is available
+    if (!firebase || !firebase.auth) return () => {};
+
     const unsub = onAuthStateChanged(firebase.auth, (user) => {
-      if (user) {
-        console.log(`Auth state: signed in as ${user.email ?? user.uid}`);
-      } else {
-        console.log('Auth state: signed out');
-      }
+      if (user) console.log(`Auth state: signed in as ${user.email ?? user.uid}`);
+      else console.log('Auth state: signed out');
     });
 
     return unsub; // cleanup listener on unmount
@@ -105,19 +104,29 @@ export default function App() {
     );
   }
 
+  // Error boundary to surface runtime errors instead of a blank screen
+  class ErrorBoundary extends React.Component<any, { error: any }>{
+    constructor(props: any){ super(props); this.state = { error: null }; }
+    static getDerivedStateFromError(err: any){ return { error: err }; }
+    componentDidCatch(err: any, info: any){ console.error('ErrorBoundary caught', err, info); }
+    render(){ if (this.state.error) return (<ThemeProvider><div style={{padding:20,color:'#900'}}><h3>App error</h3><pre>{String(this.state.error)}</pre></div></ThemeProvider>); return this.props.children; }
+  }
+
   return (
-    <AuthProvider>
-      <ThemeProvider>
-        <NavigationContainer
-          initialState={initialState}
-          onStateChange={(state) => {
-            try { if (state) storage.setItem(NAV_STATE_KEY, state); } catch {}
-          }}
-        >
-          <RootNavigator />
-        </NavigationContainer>
-      </ThemeProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <ThemeProvider>
+          <NavigationContainer
+            initialState={initialState}
+            onStateChange={(state) => {
+              try { if (state) storage.setItem(NAV_STATE_KEY, state); } catch {}
+            }}
+          >
+            <RootNavigator />
+          </NavigationContainer>
+        </ThemeProvider>
+      </AuthProvider>
+    </ErrorBoundary>
 
   );
 }

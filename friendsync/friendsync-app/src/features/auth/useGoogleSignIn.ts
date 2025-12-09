@@ -29,16 +29,35 @@ export function useGoogleSignIn() {
   const signIn = async () => {
     console.log("[Auth] signIn pressed. Platform:", Platform.OS);
 
+    // Resolve firebase module robustly — dynamic import fallback in case the
+    // unified `src/lib/firebase` default export isn't initialized yet at runtime.
+    const resolveFirebase = async () => {
+      if (firebase && (firebase as any).auth && (firebase as any).db) return firebase as any;
+      try {
+        if (Platform.OS === 'web') {
+          const mod = await import('../../lib/firebase.web');
+          return { auth: (mod as any).auth, db: (mod as any).db } as any;
+        } else {
+          const mod = await import('../../lib/firebase.native');
+          return { auth: (mod as any).auth, db: (mod as any).db } as any;
+        }
+      } catch (e) {
+        console.warn('[Auth] resolveFirebase dynamic import failed', e);
+        return firebase as any;
+      }
+    };
+
+    const fb = await resolveFirebase();
     if (Platform.OS === "web") {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
-      await signInWithPopup(firebase.auth, provider);
+      await signInWithPopup(fb.auth, provider);
 
-      const u = firebase.auth.currentUser;
+      const u = fb.auth.currentUser;
       if (u) {
           try {
             await setDoc(
-              doc(firebase.db, "users", u.uid),
+              doc(fb.db, "users", u.uid),
               {
                 uid: u.uid,
                 email: u.email,
@@ -97,14 +116,19 @@ export function useGoogleSignIn() {
       const idToken = params.get('id_token');
 
       if (idToken) {
-        const cred = GoogleAuthProvider.credential(idToken);
-        await signInWithCredential(firebase.auth, cred);
+        const fb = await (async () => {
+          if (firebase && (firebase as any).auth && (firebase as any).db) return firebase as any;
+          try { const mod = await import('../../lib/firebase.native'); return { auth: (mod as any).auth, db: (mod as any).db } as any; } catch (e) { return firebase as any; }
+        })();
 
-        const u = firebase.auth.currentUser;
+        const cred = GoogleAuthProvider.credential(idToken);
+        await signInWithCredential(fb.auth, cred);
+
+        const u = fb.auth.currentUser;
         if (u) {
           try {
             await setDoc(
-              doc(firebase.db, "users", u.uid),
+              doc(fb.db, "users", u.uid),
               {
                 uid: u.uid,
                 email: u.email,
@@ -147,8 +171,9 @@ export function useGoogleSignIn() {
     console.log("[Auth] Logging out...");
     
     simpleSync.stopAutoSync();
-    
-    await signOut(firebase.auth);
+    // Resolve firebase instance (dynamic fallback)
+    const fb = (firebase && (firebase as any).auth && (firebase as any).db) ? firebase as any : await (async () => { try { const m = await import('../../lib/firebase'); return (m as any).default || m; } catch (e) { console.warn('[Auth] dynamic import firebase failed', e); return firebase as any; } })();
+    if (fb && fb.auth) await signOut(fb.auth);
     
     await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']);
     
@@ -158,7 +183,8 @@ export function useGoogleSignIn() {
 
   async function initialSync() {
     try {
-      const user = firebase.auth.currentUser;
+      const fb = (firebase && (firebase as any).auth && (firebase as any).db) ? firebase as any : await (async () => { try { const m = await import('../../lib/firebase'); return (m as any).default || m; } catch (e) { console.warn('[Auth] dynamic import firebase failed', e); return firebase as any; } })();
+      const user = fb && fb.auth ? fb.auth.currentUser : null;
       if (!user) {
         console.warn("[Auth] No current user, skipping sync initialization");
         return;
@@ -212,24 +238,37 @@ export function useGoogleSignIn() {
     try {
       await db.init_db();
       let local = null;
-      if (u.email) local = await db.getUserByEmail(u.email);
+      // Prefer mapping by provider UID if available
+      if (u && u.uid) {
+        try { local = await db.getUserByFirebaseUid(u.uid); } catch (e) { /* ignore */ }
+      }
+      // Fallback to email-based lookup
+      if (!local && u && u.email) local = await db.getUserByEmail(u.email);
       let localId: number | null = null;
       if (local && local.userId) {
         localId = Number(local.userId);
-          // If the existing local row has no username, populate it from Firebase displayName or email localpart
-          try {
+        // If the existing local row has no username, populate it from Firebase displayName or email localpart
+        try {
           if (!local.username || String(local.username).trim().length === 0) {
             const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
             await db.updateUser(localId, { username: uname });
             try { emit('user:updated', { userId: localId, username: uname }); } catch (_) { /* ignore */ }
           }
-          // No longer storing provider-specific UID locally — rely on numeric local userId.
+
+          // Persist provider UID if missing locally (non-destructive)
+          try {
+            if ((local as any).firebase_uid == null || String((local as any).firebase_uid).trim().length === 0) {
+              if (u && u.uid) {
+                await db.updateUser(localId, { firebase_uid: u.uid } as any);
+              }
+            }
+          } catch (e) { /* ignore */ }
         } catch (e) {
           // ignore update errors
         }
       } else {
         const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
-        localId = await db.createUser({ username: uname, email: u.email || '' });
+        localId = await db.createUser({ username: uname, email: u.email || '', firebase_uid: u?.uid ?? null });
       }
       if (localId != null) {
         await AsyncStorage.setItem('userId', String(localId));

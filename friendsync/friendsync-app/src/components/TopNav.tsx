@@ -6,7 +6,7 @@ import HomeScreen from '../screens/HomeScreen';
 import ApiTestScreen from '../screens/ApiTestScreen';
 // NEW: imports for auth state and sign-out
 import { useAuth } from '../features/auth/AuthProvider';
-import { auth } from '../lib/firebase.native';
+import firebase from '../lib/firebase';
 import db from '../lib/db';
 import { useEffect, useState } from 'react';
 import storage from '../lib/storage';
@@ -141,7 +141,7 @@ export default function TopNav({ navigation }: StackHeaderProps) {
             {signedIn && (
               <TouchableOpacity
                 onPress={() => {
-                  auth.signOut();
+                  try { if (firebase && (firebase as any).auth && typeof (firebase as any).auth.signOut === 'function') { (firebase as any).auth.signOut(); } else console.warn('[TopNav] No firebase.auth available to sign out'); } catch (e) { console.warn('[TopNav] signOut failed', e); }
                   console.log('[Auth] User signed out');
                 }}
                 activeOpacity={0.7}

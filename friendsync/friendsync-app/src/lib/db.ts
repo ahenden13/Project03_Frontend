@@ -82,7 +82,7 @@ async function loadFallback(): Promise<DBShape> {
   // Normalize/validate existing shape
   const normalized: DBShape = {
     __meta__: (val.__meta__ && typeof val.__meta__ === 'object') ? val.__meta__ : { nextId: {} },
-    users: Array.isArray(val.users) ? val.users.map((u: any) => ({ userId: Number(u.userId ?? 0), email: u.email ?? '', username: u.username ?? '', phone_number: u.phone_number ?? u.phoneNumber ?? '' })) : [],
+    users: Array.isArray(val.users) ? val.users.map((u: any) => ({ userId: Number(u.userId ?? 0), email: u.email ?? '', username: u.username ?? '', phone_number: u.phone_number ?? u.phoneNumber ?? '', firebase_uid: u.firebase_uid ?? u.firebaseUid ?? '' })) : [],
     friends: Array.isArray(val.friends) ? val.friends.map((f: any) => ({ friendRowId: Number(f.friendRowId ?? 0), userId: Number(f.userId ?? 0), friendId: Number(f.friendId ?? 0), status: f.status ?? 'pending' })) : [],
     rsvps: Array.isArray(val.rsvps) ? val.rsvps.map((r: any) => ({ rsvpId: Number(r.rsvpId ?? 0), createdAt: r.createdAt ?? '', eventId: Number(r.eventId ?? 0), eventOwnerId: Number(r.eventOwnerId ?? 0), inviteRecipientId: Number(r.inviteRecipientId ?? 0), status: r.status ?? 'pending', updatedAt: r.updatedAt ?? '' })) : [],
     user_prefs: Array.isArray(val.user_prefs) ? val.user_prefs.map((p: any) => ({ preferenceId: Number(p.preferenceId ?? 0), userId: Number(p.userId ?? 0), colorScheme: Number(p.colorScheme ?? 0), notificationEnabled: Number(p.notificationEnabled ?? 1), theme: Number(p.theme ?? 0), updatedAt: p.updatedAt ?? '' })) : [],
@@ -200,6 +200,12 @@ async function createNativeTables() {
   } catch (e) {
     // ignore if column already exists or ALTER not supported
   }
+  // Add firebase_uid column to store provider-specific UID for sign-in mapping
+  try {
+    await execSqlNative(nativeDb, `ALTER TABLE users ADD COLUMN firebase_uid TEXT DEFAULT ''`);
+  } catch (e) {
+    // ignore if column already exists or ALTER not supported
+  }
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS notifications (
     notificationId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,17 +247,18 @@ export async function createUser(user: {
   email: string; 
   password?: string; 
   phone_number?: string | null;
+  firebase_uid?: string | null;
 }): Promise<number> {
   await tryInitNative();
   let userId: number;
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number) VALUES (?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '']);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid) VALUES (?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', user.firebase_uid ?? '']);
     userId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     userId = nextId(db, 'users');
-    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '' });
+    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: user.firebase_uid ?? '' });
     await saveFallback(db);
   }
   
@@ -272,7 +279,10 @@ export async function createUser(user: {
   return userId;
 }
 
-// NOTE: Removed getUserByFirebaseUid — local storage no longer stores provider-specific IDs
+// NOTE: We now optionally store a provider-specific `firebase_uid` on local users
+// to support mapping Firebase-authenticated users to numeric local `userId` values.
+// This value is optional and not used as the authoritative identity — numeric
+// `userId` remains the primary local identifier.
 
 export async function resolveLocalUserId(): Promise<number | null> {
   try {
@@ -330,6 +340,21 @@ export async function getAllUsers(): Promise<any[]> {
   return db.users;
 }
 
+export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | null> {
+  if (!firebaseUid) return null;
+  await tryInitNative();
+  if (useNative && nativeDb) {
+    try {
+      const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE firebase_uid = ? LIMIT 1;', [firebaseUid]);
+      return (res.rows._array as any[])[0] ?? null;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  const db = await loadFallback();
+  return db.users.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(firebaseUid)) ?? null;
+}
+
 export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null }) {
   await tryInitNative();
   
@@ -340,6 +365,7 @@ export async function updateUser(userId: number, updates: { username?: string; e
     if (updates.email !== undefined) { sets.push('email = ?'); params.push(updates.email); }
     if (updates.username !== undefined) { /* handled above */ }
     if (updates.phone_number !== undefined) { sets.push('phone_number = ?'); params.push(updates.phone_number ?? ''); }
+    if ((updates as any).firebase_uid !== undefined) { sets.push('firebase_uid = ?'); params.push((updates as any).firebase_uid ?? ''); }
     if (sets.length === 0) return;
     params.push(userId);
     await execSqlNative(nativeDb, `UPDATE users SET ${sets.join(', ')} WHERE userId = ?;`, params);
@@ -1172,6 +1198,7 @@ export default {
   getUserByEmail,
   resolveLocalUserId,
   getAllUsers,
+  getUserByFirebaseUid,
   // Dedupe helpers
   findUserDuplicates,
   mergeUsers,
