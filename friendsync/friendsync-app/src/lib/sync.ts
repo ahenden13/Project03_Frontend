@@ -248,7 +248,7 @@ export async function syncFromBackend(userId: number): Promise<void> {
               phone_number: user.phoneNumber || user.phone_number || null,
               firebase_uid: fid,
               remote_user_id: String(user.userId ?? user.id ?? ''),
-            });
+            }, { suppressOutbound: true });
             console.log(`syncFromBackend: created local user ${newLocalId} (${uname}) firebase_uid=${fid}`);
           }
         }
@@ -309,7 +309,7 @@ export async function syncFromBackend(userId: number): Promise<void> {
             effectiveFid = String(uname);
             if (email) uname = String(email).split('@')[0]; else uname = `remote_${remoteId ?? Date.now()}`;
           }
-          ownerLocalId = await db.createUser({ username: String(uname), email: email || '', firebase_uid: effectiveFid });
+          ownerLocalId = await db.createUser({ username: String(uname), email: email || '', firebase_uid: effectiveFid, remote_user_id: String(remoteId ?? '') }, { suppressOutbound: true });
         }
 
         // Now check if the event exists (global search by backend eventId)
@@ -382,7 +382,7 @@ export async function syncFromBackend(userId: number): Promise<void> {
           if (fid || friend.email) {
             const uname = friend.username || (friend.displayName ? String(friend.displayName).split(' ').join('_').toLowerCase() : (friend.email ? String(friend.email).split('@')[0] : `user_${Date.now()}`));
             try {
-              friendLocalId = await db.createUser({ username: String(uname), email: friend.email ?? '', password: undefined, phone_number: null, firebase_uid: fid });
+              friendLocalId = await db.createUser({ username: String(uname), email: friend.email ?? '', password: undefined, phone_number: null, firebase_uid: fid, remote_user_id: friend.userId ?? friend.id ?? '' }, { suppressOutbound: true });
               console.log(`syncFromBackend: created placeholder local user for friend ${friendLocalId} (email=${friend.email}, fid=${fid})`);
             } catch (e) {
               console.warn('syncFromBackend: failed creating placeholder friend user', e);

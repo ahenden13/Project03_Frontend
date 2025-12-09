@@ -50,8 +50,23 @@ export default function NotificationsScreen() {
       const incoming = await db.getFriendRequestsForUser(resolvedUserId) || [];
       const enrichedFriends = await Promise.all((incoming || []).map(async (r: any) => {
         try {
-          const requester = await db.getUserById(Number(r.userId));
-          return { id: `fr-${r.friendRowId}`, row: r, name: requester ? (requester.username ?? requester.email ?? `user ${requester.userId}`) : `user ${r.userId}` };
+          // Resolve requester preferring numeric local userId, then remote/server id, then provider UID, then email
+          let requester: any = null;
+          try {
+            const asNum = Number(r.userId);
+            if (Number.isFinite(asNum) && !Number.isNaN(asNum)) requester = await db.getUserById(asNum);
+          } catch {}
+          if (!requester) {
+            try { requester = await db.getUserByRemoteId(r.userId); } catch (_) { /* ignore */ }
+          }
+          if (!requester) {
+            try { requester = await db.getUserByFirebaseUid(String(r.user_uid ?? r.userFirebaseUid ?? r.userUid ?? r.userId ?? '')); } catch (_) { /* ignore */ }
+          }
+          if (!requester && r.userEmail) {
+            try { requester = await db.getUserByEmail(String(r.userEmail)); } catch (_) { /* ignore */ }
+          }
+          const name = requester ? (requester.username ?? requester.email ?? `user ${requester.userId}`) : (r.userName ?? r.userDisplayName ?? `user ${r.userId}`);
+          return { id: `fr-${r.friendRowId}`, row: r, name };
         } catch (_) { return { id: `fr-${r.friendRowId}`, row: r, name: `user ${r.userId}` }; }
       }));
 
@@ -65,7 +80,21 @@ export default function NotificationsScreen() {
             const ev = (evs || []).find((e: any) => Number(e.eventId) === Number(r.eventId));
             if (ev) title = ev.eventTitle ?? ev.title ?? title;
           }
-          const owner = r.eventOwnerId != null ? await db.getUserById(Number(r.eventOwnerId)) : null;
+          // Resolve owner preferring numeric local userId, then remote id, then firebase uid, then email
+          let owner: any = null;
+          try {
+            const asNum = Number(r.eventOwnerId);
+            if (Number.isFinite(asNum) && !Number.isNaN(asNum)) owner = await db.getUserById(asNum);
+          } catch {}
+          if (!owner) {
+            try { owner = await db.getUserByRemoteId(r.eventOwnerId); } catch (_) { /* ignore */ }
+          }
+          if (!owner) {
+            try { owner = await db.getUserByFirebaseUid(String(r.eventOwnerUid ?? r.eventOwnerFirebaseUid ?? r.eventOwnerId ?? '')); } catch (_) { /* ignore */ }
+          }
+          if (!owner && r.eventOwnerEmail) {
+            try { owner = await db.getUserByEmail(String(r.eventOwnerEmail)); } catch (_) { /* ignore */ }
+          }
           const ownerName = owner ? (owner.username ?? owner.email ?? `user ${owner.userId}`) : undefined;
           return { id: `rsvp-${r.rsvpId}`, row: r, title, ownerName };
         } catch (_) { return { id: `rsvp-${r.rsvpId}`, row: r, title: `Event ${r.eventId}` }; }

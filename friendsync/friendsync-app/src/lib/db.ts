@@ -256,7 +256,7 @@ export async function createUser(user: {
   phone_number?: string | null;
   firebase_uid?: string | null;
   remote_user_id?: string | null;
-}): Promise<number> {
+}, opts?: { suppressOutbound?: boolean }): Promise<number> {
   await tryInitNative();
   let userId: number;
   
@@ -285,7 +285,11 @@ export async function createUser(user: {
     }
   }
   // Emit outbound user created event so sync layer can push to backend API
-  try { emit('outbound:userCreated', { userId, username: user.username ?? '', email: user.email ?? '', firebase_uid: user.firebase_uid ?? '' }); } catch (_) { }
+  try {
+    if (!opts || !opts.suppressOutbound) {
+      emit('outbound:userCreated', { userId, username: user.username ?? '', email: user.email ?? '', firebase_uid: user.firebase_uid ?? '', remote_user_id: user.remote_user_id ?? '' });
+    }
+  } catch (_) { }
   
   return userId;
 }
