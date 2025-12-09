@@ -1,105 +1,212 @@
-import React, { useEffect, useState } from 'react';
-import { Modal, View, Text, TextInput, FlatList, TouchableOpacity, ActivityIndicator } from 'react-native';
+// src/components/InviteFriendsModal.tsx
+import React, { useState, useEffect } from 'react';
+import { View, Modal, Text, TextInput, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '../lib/ThemeProvider';
 import db from '../lib/db';
 
-type Props = {
+interface InviteFriendsModalProps {
   visible: boolean;
   onClose: () => void;
   eventId: number;
   currentUserId: number;
   eventOwnerId?: number | null;
-};
+}
 
-export default function InviteFriendsModal({ visible, onClose, eventId, currentUserId, eventOwnerId }: Props) {
+export default function InviteFriendsModal({ 
+  visible, 
+  onClose, 
+  eventId, 
+  currentUserId,
+  eventOwnerId 
+}: InviteFriendsModalProps) {
   const t = useTheme();
+  const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
-  const [friends, setFriends] = useState<Array<any>>([]);
+  const [invitedIds, setInvitedIds] = useState<number[]>([]);
 
   useEffect(() => {
-    let mounted = true;
-    async function load() {
-      if (!visible) return;
-      setLoading(true);
-      try {
-        await db.init_db();
-        // get all friend rows referencing current user and filter accepted
-        const rows = await db.getFriendRowsForUser(currentUserId);
-        const accepted: any[] = [];
-        for (const r of rows || []) {
-          try {
-            if (r.status !== 'accepted') continue;
-            const otherId = Number(r.userId) === Number(currentUserId) ? Number(r.friendId) : Number(r.userId);
-            const u = await db.getUserById(otherId);
-            accepted.push({ id: otherId, username: u?.username ?? u?.email ?? `user${otherId}`, email: u?.email ?? null, invited: false });
-          } catch (e) {
-            // ignore individual fetch errors
-          }
-        }
-        if (mounted) setFriends(accepted);
-      } catch (e) {
-        console.warn('InviteFriendsModal: failed to load friends', e);
-        if (mounted) setFriends([]);
-      } finally {
-        if (mounted) setLoading(false);
-      }
+    if (visible && currentUserId) {
+      loadFriends();
     }
-    load();
-    return () => { mounted = false; };
   }, [visible, currentUserId]);
 
-  async function invite(targetId: number, idx: number) {
+  async function loadFriends() {
+    console.log('=== InviteFriendsModal: loadFriends ===');
+    console.log('currentUserId:', currentUserId);
+    console.log('eventId:', eventId);
+    
+    setLoading(true);
     try {
-      // create pending RSVP for target
-      await db.createRsvp({ eventId: eventId, eventOwnerId: eventOwnerId ?? currentUserId, inviteRecipientId: targetId, status: 'pending' });
-      setFriends(prev => prev.map((f,i) => i === idx ? { ...f, invited: true } : f));
+      // Get accepted friends (this now fetches from API!)
+      const friendships = await db.getFriendsForUser(currentUserId);
+      console.log('Friendships from DB:', friendships);
+      
+      // Get already invited users for this event
+      const existingRsvps = await db.getRsvpsForEvent(eventId);
+      console.log('Existing RSVPs:', existingRsvps);
+      const alreadyInvitedSet = new Set(
+        (existingRsvps || []).map((r: any) => Number(r.inviteRecipientId))
+      );
+      console.log('Already invited IDs:', Array.from(alreadyInvitedSet));
+      
+      // Map friendships to friend user objects
+      const friendUsers = await Promise.all(
+        (friendships || []).map(async (f: any) => {
+          try {
+            // Get the OTHER user's ID (not your own)
+            const friendUserId = Number(f.userId) === Number(currentUserId) 
+              ? Number(f.friendId) 
+              : Number(f.userId);
+            
+            console.log('Loading friend user:', friendUserId);
+            
+            // Don't show if already invited
+            if (alreadyInvitedSet.has(friendUserId)) {
+              console.log('Friend already invited:', friendUserId);
+              return null;
+            }
+            
+            // Load their user data
+            const user = await db.getUserById(friendUserId);
+            console.log('Loaded user:', user);
+            
+            return {
+              id: friendUserId,
+              username: user?.username || user?.email || `User ${friendUserId}`,
+              email: user?.email || ''
+            };
+          } catch (e) {
+            console.warn('Failed to load friend:', e);
+            return null;
+          }
+        })
+      );
+      
+      // Filter out nulls and set
+      const validFriends = friendUsers.filter(f => f !== null);
+      console.log('Valid friends to show:', validFriends);
+      setFriends(validFriends);
     } catch (e) {
-      console.warn('Invite failed', e);
+      console.error('Failed to load friends:', e);
+      setFriends([]);
+    } finally {
+      setLoading(false);
     }
   }
 
-  const filtered = friends.filter(f => {
-    const q = (search || '').trim().toLowerCase();
-    if (!q) return true;
-    return String(f.username || '').toLowerCase().includes(q) || String(f.email || '').toLowerCase().includes(q);
-  });
+  async function sendInvite(friendId: number) {
+    console.log('=== Sending invite ===');
+    console.log('eventId:', eventId);
+    console.log('friendId (inviteRecipientId):', friendId);
+    console.log('eventOwnerId:', eventOwnerId || currentUserId);
+    
+    try {
+      await db.createRsvp({
+        eventId: eventId,
+        eventOwnerId: eventOwnerId || currentUserId,
+        inviteRecipientId: friendId,
+        status: 'no-reply' // Important: Use 'no-reply' to match backend
+      });
+      
+      console.log('Invite sent successfully');
+      
+      // Mark as invited locally
+      setInvitedIds(prev => [...prev, friendId]);
+      
+      // Remove from list
+      setFriends(friends.filter(f => f.id !== friendId));
+    } catch (e) {
+      console.error('Failed to send invite:', e);
+      alert('Failed to send invitation. Please try again.');
+    }
+  }
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: '#00000066', justifyContent: 'center', alignItems: 'center', padding: 12 }}>
-        <View style={{ backgroundColor: t.color.surface, borderRadius: 10, overflow: 'hidden', maxWidth: 520, width: '100%', alignSelf: 'center', position: 'relative' }}>
-          <TouchableOpacity onPress={onClose} style={{ position: 'absolute', top: 8, right: 8, padding: 6, zIndex: 10 }} accessibilityLabel="Close invite">
-            <MaterialIcons name="close" size={20} color={t.color.textMuted} />
-          </TouchableOpacity>
-
-          <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#eee' }}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#00000066', justifyContent: 'center', padding: 12 }}>
+        <View style={{ backgroundColor: t.color.surface, borderRadius: 10, overflow: 'hidden', maxHeight: '80%', maxWidth: 500, width: '100%', alignSelf: 'center' }}>
+          {/* Header */}
+          <View style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <Text style={{ fontSize: 18, fontWeight: '700', color: t.color.text }}>Invite Friends</Text>
-            <Text style={{ color: t.color.textMuted, marginTop: 6 }}>Select friends to invite to this event.</Text>
+            <TouchableOpacity onPress={onClose} style={{ padding: 6 }} accessibilityLabel="Close invite modal">
+              <MaterialIcons name="close" size={20} color={t.color.textMuted} />
+            </TouchableOpacity>
           </View>
 
+          {/* Content */}
           <View style={{ padding: 12 }}>
-            <TextInput placeholder="Search friends" value={search} onChangeText={setSearch} style={{ backgroundColor: '#fff', padding: 10, borderRadius: 6, marginBottom: 12 }} />
+            {/* Search box */}
+            <TextInput
+              placeholder="Search friends..."
+              value={search}
+              onChangeText={setSearch}
+              style={{
+                backgroundColor: '#fff',
+                padding: 10,
+                borderRadius: 6,
+                marginBottom: 12,
+                borderWidth: 1,
+                borderColor: '#ddd'
+              }}
+            />
 
+            {/* Friends list */}
             {loading ? (
-              <ActivityIndicator />
+              <ActivityIndicator style={{ padding: 20 }} />
+            ) : friends.length === 0 ? (
+              <View style={{ padding: 20, alignItems: 'center' }}>
+                <Text style={{ color: t.color.textMuted }}>
+                  {search ? 'No friends match your search' : 'No friends to invite'}
+                </Text>
+              </View>
             ) : (
               <FlatList
-                data={filtered}
-                keyExtractor={(it) => String(it.id)}
-                style={{ maxHeight: 360 }}
-                renderItem={({ item, index }) => (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 }}>
-                    <View>
-                      <Text style={{ color: t.color.text, fontWeight: '700' }}>{item.username}</Text>
-                      {!!item.email && <Text style={{ color: t.color.textMuted }}>{item.email}</Text>}
+                data={friends.filter(f => {
+                  const q = (search || '').trim().toLowerCase();
+                  if (!q) return true;
+                  const un = String(f.username || '').toLowerCase();
+                  const em = String(f.email || '').toLowerCase();
+                  return un.includes(q) || em.includes(q);
+                })}
+                keyExtractor={(item) => String(item.id)}
+                style={{ maxHeight: 400 }}
+                renderItem={({ item }) => (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 8,
+                      borderBottomWidth: 1,
+                      borderBottomColor: '#eee'
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: t.color.text, fontWeight: '700' }}>
+                        {item.username}
+                      </Text>
+                      {!!item.email && (
+                        <Text style={{ color: t.color.textMuted, fontSize: 12 }}>
+                          {item.email}
+                        </Text>
+                      )}
                     </View>
-                    <View>
-                      <TouchableOpacity onPress={() => invite(item.id, index)} disabled={item.invited} style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: item.invited ? '#888' : t.color.accent }}>
-                        <Text style={{ color: '#fff', fontWeight: '700' }}>{item.invited ? 'Invited' : 'Invite'}</Text>
-                      </TouchableOpacity>
-                    </View>
+                    <TouchableOpacity
+                      onPress={() => sendInvite(item.id)}
+                      disabled={invitedIds.includes(item.id)}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 8,
+                        borderRadius: 8,
+                        backgroundColor: invitedIds.includes(item.id) ? '#888' : t.color.accent
+                      }}
+                    >
+                      <Text style={{ color: '#fff', fontWeight: '700' }}>
+                        {invitedIds.includes(item.id) ? 'Invited' : 'Invite'}
+                      </Text>
+                    </TouchableOpacity>
                   </View>
                 )}
               />

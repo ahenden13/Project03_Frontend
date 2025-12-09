@@ -22,56 +22,109 @@ export default function NotificationsScreen() {
 
   // Extracted loader so we can refresh after accept/decline actions
   const loadNotifications = async () => {
+    console.log('=== NotificationsScreen: loadNotifications START ===');
     setLoading(true);
     try {
       await db.init_db();
       const userIdStr = await AsyncStorage.getItem('userId');
       const uid = userIdStr ? Number(userIdStr) : NaN;
       let resolvedUserId = Number.isFinite(uid) && !Number.isNaN(uid) ? uid : null;
+      console.log('Step 1: Resolved userId from AsyncStorage:', resolvedUserId);
+      
       if (resolvedUserId == null) {
         const userEmail = await AsyncStorage.getItem('userEmail');
+        console.log('Step 2: Trying to resolve by email:', userEmail);
         if (userEmail) {
           const u = await db.getUserByEmail(userEmail);
+          console.log('Step 2a: User found by email:', u);
           if (u && u.userId) resolvedUserId = Number(u.userId);
         }
       }
       if (resolvedUserId == null && __DEV__) {
+        console.log('Step 3: DEV mode - getting first user');
         const all = await db.getAllUsers();
+        console.log('Step 3a: All users:', all);
         if (all && all.length > 0) resolvedUserId = all[0].userId;
       }
+      console.log('Final resolved userId:', resolvedUserId);
       setCurrentUserId(resolvedUserId);
 
       if (resolvedUserId == null) {
+        console.log('No userId found - clearing notifications');
         setFriendRequests([]);
         setPendingRsvps([]);
         return;
       }
 
+      console.log('=== Fetching friend requests for user:', resolvedUserId, '===');
       const incoming = await db.getFriendRequestsForUser(resolvedUserId) || [];
-      const enrichedFriends = await Promise.all((incoming || []).map(async (r: any) => {
+      console.log('Raw friend requests from DB:', incoming);
+      console.log('Number of friend requests:', incoming.length);
+      
+      const enrichedFriends = await Promise.all((incoming || []).map(async (r: any, index: number) => {
+        console.log(`Processing friend request ${index + 1}:`, r);
         try {
           // Resolve requester preferring numeric local userId, then remote/server id, then provider UID, then email
           let requester: any = null;
           try {
             const asNum = Number(r.userId);
-            if (Number.isFinite(asNum) && !Number.isNaN(asNum)) requester = await db.getUserById(asNum);
-          } catch {}
-          if (!requester) {
-            try { requester = await db.getUserByRemoteId(r.userId); } catch (_) { /* ignore */ }
+            console.log(`  Attempting to resolve requester by numeric userId: ${asNum}`);
+            if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
+              requester = await db.getUserById(asNum);
+              console.log('  Requester found by numeric ID:', requester);
+            }
+          } catch (e) {
+            console.log('  Failed to get user by numeric ID:', e);
           }
+          
           if (!requester) {
-            try { requester = await db.getUserByFirebaseUid(String(r.user_uid ?? r.userFirebaseUid ?? r.userUid ?? r.userId ?? '')); } catch (_) { /* ignore */ }
+            console.log('  Attempting to resolve by remote ID:', r.userId);
+            try { 
+              requester = await db.getUserByRemoteId(r.userId);
+              console.log('  Requester found by remote ID:', requester);
+            } catch (_) { 
+              console.log('  Failed to get user by remote ID');
+            }
           }
+          
+          if (!requester) {
+            const uid = String(r.user_uid ?? r.userFirebaseUid ?? r.userUid ?? r.userId ?? '');
+            console.log('  Attempting to resolve by Firebase UID:', uid);
+            try { 
+              requester = await db.getUserByFirebaseUid(uid);
+              console.log('  Requester found by Firebase UID:', requester);
+            } catch (_) { 
+              console.log('  Failed to get user by Firebase UID');
+            }
+          }
+          
           if (!requester && r.userEmail) {
-            try { requester = await db.getUserByEmail(String(r.userEmail)); } catch (_) { /* ignore */ }
+            console.log('  Attempting to resolve by email:', r.userEmail);
+            try { 
+              requester = await db.getUserByEmail(String(r.userEmail));
+              console.log('  Requester found by email:', requester);
+            } catch (_) { 
+              console.log('  Failed to get user by email');
+            }
           }
+          
           const name = requester ? (requester.username ?? requester.email ?? `user ${requester.userId}`) : (r.userName ?? r.userDisplayName ?? `user ${r.userId}`);
+          console.log('  Final requester name:', name);
           return { id: `fr-${r.friendRowId}`, row: r, name };
-        } catch (_) { return { id: `fr-${r.friendRowId}`, row: r, name: `user ${r.userId}` }; }
+        } catch (e) { 
+          console.log('  Error processing friend request:', e);
+          return { id: `fr-${r.friendRowId}`, row: r, name: `user ${r.userId}` }; 
+        }
       }));
 
+      console.log('Enriched friend requests:', enrichedFriends);
+
+      console.log('=== Fetching RSVPs for user:', resolvedUserId, '===');
       const allRsvps = await db.getRsvpsForUser(resolvedUserId) || [];
+      console.log('All RSVPs from DB:', allRsvps);
       const pending = (allRsvps || []).filter((r: any) => String(r.status) === 'pending');
+      console.log('Pending RSVPs:', pending);
+      
       const enrichedRsvps = await Promise.all(pending.map(async (r: any) => {
         try {
           let title = `Event ${r.eventId}`;
@@ -100,8 +153,11 @@ export default function NotificationsScreen() {
         } catch (_) { return { id: `rsvp-${r.rsvpId}`, row: r, title: `Event ${r.eventId}` }; }
       }));
 
+      console.log('Setting friend requests:', enrichedFriends.length);
+      console.log('Setting pending RSVPs:', enrichedRsvps.length);
       setFriendRequests(enrichedFriends);
       setPendingRsvps(enrichedRsvps);
+      console.log('=== NotificationsScreen: loadNotifications END ===');
     } catch (e) {
       console.warn('NotificationsScreen load failed', e);
     } finally {
@@ -141,26 +197,48 @@ export default function NotificationsScreen() {
                     <View style={styles.actions}>
                       <Button title="Accept" onPress={async () => {
                         try {
+                          console.log('=== ACCEPT BUTTON CLICKED ===');
+                          console.log('Full item.row:', item.row);
+                          console.log('item.row.friendRowId:', item.row.friendRowId);
+                          console.log('item.row.id:', item.row.id);
+                          const friendId = item.row.friendRowId || item.row.id;
+                          console.log('Using friendId:', friendId);
+                          console.log('Type of friendId:', typeof friendId);
+                          console.log('==============================');
+                          
                           setLoading(true);
-                          if (db.respondFriendRequest) {
-                            // try common API shapes
-                            try { await db.respondFriendRequest(item.row.friendRowId, 'accepted'); } catch (_) { await db.respondFriendRequest(item.row.friendRowId, true); }
-                          } else if (db.updateFriendStatus) {
-                            await db.updateFriendStatus(item.row.friendRowId, 'accepted');
-                          }
-                        } catch (e) { console.warn('accept friend failed', e); }
-                        await loadNotifications();
+                          
+                          // Call respondToFriendRequest with accept=true
+                          await db.respondToFriendRequest(friendId, true);
+                          
+                          console.log('Friend request accepted successfully');
+                        } catch (e) { 
+                          console.error('Accept friend failed:', e);
+                          alert('Failed to accept friend request. Please try again.');
+                        } finally {
+                          // Reload notifications to update the UI
+                          await loadNotifications();
+                        }
                       }} />
                       <Button title="Decline" onPress={async () => {
                         try {
+                          console.log('Declining friend request:', item.row.friendRowId || item.row.id);
                           setLoading(true);
-                          if (db.respondFriendRequest) {
-                            try { await db.respondFriendRequest(item.row.friendRowId, 'declined'); } catch (_) { await db.respondFriendRequest(item.row.friendRowId, false); }
-                          } else if (db.updateFriendStatus) {
-                            await db.updateFriendStatus(item.row.friendRowId, 'declined');
-                          }
-                        } catch (e) { console.warn('decline friend failed', e); }
-                        await loadNotifications();
+                          
+                          // Use the friendRowId or id from the row
+                          const friendId = item.row.friendRowId || item.row.id;
+                          
+                          // Call respondToFriendRequest with accept=false
+                          await db.respondToFriendRequest(friendId, false);
+                          
+                          console.log('Friend request declined successfully');
+                        } catch (e) { 
+                          console.error('Decline friend failed:', e);
+                          alert('Failed to decline friend request. Please try again.');
+                        } finally {
+                          // Reload notifications to update the UI
+                          await loadNotifications();
+                        }
                       }} />
                     </View>
                   </View>
@@ -182,23 +260,27 @@ export default function NotificationsScreen() {
                     <View style={styles.actions}>
                       <Button title="Accept" onPress={async () => {
                         try {
+                          console.log('Accepting RSVP:', item.row.rsvpId);
                           setLoading(true);
                           if (db.updateRsvp) {
                             try { await db.updateRsvp(item.row.rsvpId, 'accepted'); } catch (_) { await db.updateRsvp(item.row.rsvpId, { status: 'accepted' }); }
                           } else if (db.respondRsvp) {
                             await db.respondRsvp(item.row.rsvpId, 'accepted');
                           }
+                          console.log('RSVP accepted successfully');
                         } catch (e) { console.warn('accept rsvp failed', e); }
                         await loadNotifications();
                       }} />
                       <Button title="Decline" onPress={async () => {
                         try {
+                          console.log('Declining RSVP:', item.row.rsvpId);
                           setLoading(true);
                           if (db.updateRsvp) {
                             try { await db.updateRsvp(item.row.rsvpId, 'declined'); } catch (_) { await db.updateRsvp(item.row.rsvpId, { status: 'declined' }); }
                           } else if (db.respondRsvp) {
                             await db.respondRsvp(item.row.rsvpId, 'declined');
                           }
+                          console.log('RSVP declined successfully');
                         } catch (e) { console.warn('decline rsvp failed', e); }
                         await loadNotifications();
                       }} />
@@ -224,3 +306,14 @@ export default function NotificationsScreen() {
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  rowWithActions: {
+    marginBottom: 8,
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+});

@@ -237,6 +237,11 @@ export default function EventsScreen() {
   }
 
   async function openInviteForEvent(eventId?: number, ownerId?: number | null) {
+    console.log('=== openInviteForEvent ===');
+    console.log('eventId:', eventId);
+    console.log('ownerId:', ownerId);
+    console.log('currentUserId:', currentUserId);
+    
     if (!eventId) return;
     // close the detail modal (selected) so the invite modal isn't covered
     try { setSelected(null); setSelectedBody(null); } catch (_) { /* ignore */ }

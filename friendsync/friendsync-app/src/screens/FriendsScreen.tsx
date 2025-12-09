@@ -48,7 +48,9 @@ export default function FriendsScreen() {
         }
 
         // get friend rows (accepted + pending) referencing this user and load counterpart user records
-        const friendRows = await db.getFriendRowsForUser(resolvedUserId);
+        // const friendRows = await db.getFriendRowsForUser(resolvedUserId);
+        const friendRows = await db.getFriendsForUser(resolvedUserId);
+
         const rows: FriendRow[] = [];
         for (const fr of friendRows || []) {
           try {
