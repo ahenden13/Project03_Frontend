@@ -13,15 +13,20 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.friendsync.app"
     },
     "android": {
+      "package": "com.friendsync.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
+    },
+    "experiments": {
+      "typedRoutes": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,10 +36,12 @@
       "android",
       "web"
     ],
-    "scheme": "friendsync",
+
     "extra": {
-      "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "1013334906995-8mbvl4rhu9jh4haool5jpup9qng9q7ph.apps.googleusercontent.com"
+      "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "1013334906995-8mbvl4rhu9jh4haool5jpup9qng9q7ph.apps.googleusercontent.com",
+      "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "1013334906995-bovv18flvahmc7drh8chokfd6sldprt0.apps.googleusercontent.com"
     },
+
     "plugins": [
       "expo-web-browser"
     ]
