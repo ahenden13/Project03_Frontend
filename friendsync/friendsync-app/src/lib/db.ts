@@ -928,7 +928,8 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         eventId: String(rsvp.eventId),
-        userId: String(rsvp.inviteRecipientId)  // ✅ Change "inviteRecipientId" to "userId"
+        inviteRecipientId: String(rsvp.inviteRecipientId),
+        eventOwnerId: String(rsvp.eventOwnerId)
       })
     });
     
@@ -971,13 +972,13 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
   }
   
   // STEP 3: Sync to Firebase (if needed - API might already do this)
-  if (FirebaseSync.isFirebaseSyncEnabled() && rsvpId) {
-    try {
-      await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp });
-    } catch (error) {
-      console.warn('Failed to sync RSVP to Firebase:', error);
-    }
-  }
+  // if (FirebaseSync.isFirebaseSyncEnabled() && rsvpId) {
+  //   try {
+  //     await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp });
+  //   } catch (error) {
+  //     console.warn('Failed to sync RSVP to Firebase:', error);
+  //   }
+  // }
   
   // Emit event
   try { emit('outbound:rsvpCreated', { rsvpId, ...rsvp }); } catch (_) { }
@@ -986,13 +987,65 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
 }
 
 export async function getRsvpsForEvent(eventId: number): Promise<any[]> {
+  console.log('=== getRsvpsForEvent ===');
+  console.log('eventId:', eventId);
+  
   await tryInitNative();
+  
+  // STEP 1: Fetch from API to get latest RSVPs
+  try {
+    const apiUrl = `${API_BASE_URL}/api/rsvps/event/${eventId}`;
+    console.log('Fetching RSVPs from API:', apiUrl);
+    
+    const response = await fetch(apiUrl);
+    if (response.ok) {
+      const apiData = await response.json();
+      console.log('API returned RSVPs for event:', apiData);
+      
+      // STEP 2: Sync to local database
+      if (useNative && nativeDb) {
+        for (const rsvp of apiData) {
+          try {
+            await execSqlNative(
+              nativeDb,
+              'INSERT OR REPLACE INTO rsvps (rsvpId, eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?);',
+              [
+                rsvp.rsvpId || rsvp.id,
+                rsvp.eventId,
+                rsvp.eventOwnerId,
+                rsvp.inviteRecipientId,
+                rsvp.status,
+                rsvp.createdAt || new Date().toISOString(),
+                rsvp.updatedAt || new Date().toISOString()
+              ]
+            );
+          } catch (e) {
+            console.warn('Failed to sync RSVP to local DB:', e);
+          }
+        }
+      }
+      
+      return apiData;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch RSVPs from API, falling back to local:', error);
+  }
+  
+  // STEP 3: Fallback to local database if API fails
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM rsvps WHERE eventId = ?;', [eventId]);
+    const res: any = await execSqlNative(
+      nativeDb, 
+      'SELECT * FROM rsvps WHERE eventId = ?;', 
+      [eventId]
+    );
+    console.log('Local DB RSVPs:', res.rows._array);
     return res.rows._array as any[];
   }
+  
   const db = await loadFallback();
-  return db.rsvps.filter((r: any) => r.eventId === eventId);
+  const localRsvps = db.rsvps.filter((r: any) => r.eventId === eventId);
+  console.log('Fallback DB RSVPs:', localRsvps);
+  return localRsvps;
 }
 
 export async function getRsvpsForUser(userId: number): Promise<any[]> {
@@ -1001,9 +1054,8 @@ export async function getRsvpsForUser(userId: number): Promise<any[]> {
   
   await tryInitNative();
   
-  // STEP 1: Fetch from API to get latest RSVPs
   try {
-    const apiUrl = `${API_BASE_URL}/api/rsvps/user/${userId}`;
+    const apiUrl = `${API_BASE_URL}/api/rsvps/user/${userId}/pending`;  // ✅ Add /pending
     console.log('Fetching RSVPs from API:', apiUrl);
     
     const response = await fetch(apiUrl);
@@ -1011,16 +1063,12 @@ export async function getRsvpsForUser(userId: number): Promise<any[]> {
       const apiData = await response.json();
       console.log('API returned RSVPs:', apiData);
       
-      // Filter for RSVPs where this user is the inviteRecipientId
-      // Handle both string and number types
-      const userRsvps = (apiData || []).filter((rsvp: any) => 
-        String(rsvp.inviteRecipientId) === String(userId)
-      );
-      console.log('Filtered RSVPs for user:', userRsvps);
+      // No need to filter - endpoint already returns pending only
+      console.log('Pending RSVPs:', apiData);
       
-      // STEP 2: Sync to local database
+      // Sync to local database
       if (useNative && nativeDb) {
-        for (const rsvp of userRsvps) {
+        for (const rsvp of apiData) {
           try {
             await execSqlNative(
               nativeDb,
@@ -1041,32 +1089,36 @@ export async function getRsvpsForUser(userId: number): Promise<any[]> {
         }
       }
       
-      return userRsvps;
+      return apiData;
     }
   } catch (error) {
     console.warn('Failed to fetch RSVPs from API, falling back to local:', error);
   }
   
-  // STEP 3: Fallback to local database if API fails
+  // Fallback to local database if API fails
   if (useNative && nativeDb) {
     const res: any = await execSqlNative(
       nativeDb, 
-      'SELECT * FROM rsvps WHERE inviteRecipientId = ? OR eventOwnerId = ?;', 
-      [userId, userId]
+      'SELECT * FROM rsvps WHERE inviteRecipientId = ?;', 
+      [userId]
     );
     console.log('Local DB RSVPs:', res.rows._array);
-    return res.rows._array as any[];
+    // Filter for pending locally
+    return (res.rows._array || []).filter((r: any) => 
+      r.status === 'pending' || r.status === 'no-reply'
+    );
   }
   
   const db = await loadFallback();
   const localRsvps = db.rsvps.filter((r: any) => 
-    r.inviteRecipientId === userId || r.eventOwnerId === userId
+    r.inviteRecipientId === userId && 
+    (r.status === 'pending' || r.status === 'no-reply')
   );
   console.log('Fallback DB RSVPs:', localRsvps);
   return localRsvps;
 }
 
-export async function updateRsvp(rsvpId: number, updates: { status?: string; }) {
+export async function updateRsvp(rsvpId: number | string, updates: { status?: string; }) {
   console.log('=== updateRsvp ===');
   console.log('rsvpId:', rsvpId);
   console.log('updates:', updates);
@@ -1074,24 +1126,29 @@ export async function updateRsvp(rsvpId: number, updates: { status?: string; }) 
   await tryInitNative();
   const now = new Date().toISOString();
   
-  // STEP 1: Update via API
+  // STEP 1: Update via API first
   try {
     const apiUrl = `${API_BASE_URL}/api/rsvps/${rsvpId}/status`;
     console.log('Updating RSVP via API:', apiUrl);
+    console.log('Status:', updates.status);
     
     const response = await fetch(apiUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        status: updates.status
+        status: updates.status  // Send as object with status field
       })
     });
     
+    console.log('Response status:', response.status);
+    
     if (!response.ok) {
-      throw new Error(`API returned ${response.status}`);
+      const errorText = await response.text();
+      console.error('API error:', errorText);
+      throw new Error(`API returned ${response.status}: ${errorText}`);
     }
     
-    console.log('RSVP updated via API');
+    console.log('RSVP updated via API successfully');
   } catch (error) {
     console.error('Failed to update RSVP via API:', error);
     throw error;
@@ -1106,14 +1163,16 @@ export async function updateRsvp(rsvpId: number, updates: { status?: string; }) 
     );
   } else {
     const db = await loadFallback();
-    const idx = db.rsvps.findIndex((r: any) => r.rsvpId === rsvpId);
+    const idx = db.rsvps.findIndex((r: any) => 
+      String(r.rsvpId) === String(rsvpId)
+    );
     if (idx !== -1) {
       db.rsvps[idx] = { ...db.rsvps[idx], ...updates, updatedAt: now };
       await saveFallback(db);
     }
   }
   
-  // Sync to Firebase
+  // STEP 3: Sync to Firebase (only if still enabled - but you should disable it)
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
       await FirebaseSync.updateRsvpInFirebase(rsvpId, updates);

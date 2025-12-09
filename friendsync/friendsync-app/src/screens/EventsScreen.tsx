@@ -97,58 +97,103 @@ export default function EventsScreen() {
           const rows = normalizeAndFilter(raw);
           setEvents(rows);
         } else {
-          // friend events: gather accepted friends and aggregate their events
-          const friendIds = await db.getFriendsForUser(resolvedUserId);
+          // friend events: only show events where user has ACCEPTED invitations
+          console.log('=== Loading Friend Events ===');
+          console.log('Current userId:', resolvedUserId);
+          
+          const friendships = await db.getFriendsForUser(resolvedUserId);
+          console.log('Friendships:', friendships);
+          
+          // Extract the actual friend user IDs from friendship objects
+          const friendIds = friendships.map((f: any) => {
+            // Get the OTHER user's ID (not your own)
+            const friendId = Number(f.userId) === Number(resolvedUserId) 
+              ? Number(f.friendId) 
+              : Number(f.userId);
+            console.log(`Friendship: userId=${f.userId}, friendId=${f.friendId}, extracted=${friendId}`);
+            return friendId;
+          });
+          
+          console.log('Extracted friend IDs:', friendIds);
+          
           const allRows: EventRow[] = [];
+          
           for (const fid of friendIds || []) {
             try {
+              console.log(`Loading events for friend ${fid}...`);
               const raw = await db.getEventsForUser(fid);
+              console.log(`Friend ${fid} has ${raw.length} events`);
+              
               const rows = normalizeAndFilter(raw);
-              // prefix title with friend's username for clarity, but avoid duplicating
-              // the friend's name when the event title already includes it (e.g. "Bob: Team Standup").
+              console.log(`After filtering, ${rows.length} events remain`);
+              
+              // Get friend's name for prefixing
               const friend = await db.getUserById(fid);
               const friendName = friend && friend.username ? String(friend.username) : '';
               const prefix = friendName ? `${friendName}: ` : '';
+              
               const sanitize = (title: string) => {
                 if (!friendName) return title;
                 const t = title || '';
-                // remove existing leading "<name>[: -]" patterns (case-insensitive)
                 const re = new RegExp(`^\\s*${friendName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*[:\-]\s*`, 'i');
                 if (re.test(t)) return t.replace(re, '');
-                // also avoid double-prefix if already prefixed with our computed prefix
                 if (t.toLowerCase().startsWith(prefix.toLowerCase())) return t.slice(prefix.length);
                 return t;
               };
-              rows.forEach(r => { r.title = prefix ? `${prefix}${sanitize(String(r.title || ''))}` : String(r.title || ''); allRows.push(r); });
-            } catch (e) {
-              // ignore individual friend failures
-            }
-          }
-          // enrich aggregated rows with RSVP status for current user
-          for (let i = 0; i < allRows.length; i++) {
-            const r = allRows[i];
-            try {
-              if (r.eventIdNum) {
-                const rsvps = await db.getRsvpsForEvent(r.eventIdNum);
-                const mine = (rsvps || []).find((x: any) => x.inviteRecipientId === resolvedUserId);
-                if (mine) {
-                  r.rsvpStatus = mine.status ?? null;
-                  r.rsvpId = mine.rsvpId ?? mine.rsvpId;
+              
+              // For each event, check if user has ACCEPTED RSVP
+              for (const row of rows) {
+                if (row.eventIdNum) {
+                  try {
+                    console.log(`Checking RSVPs for event ${row.eventIdNum}...`);
+                    const rsvps = await db.getRsvpsForEvent(row.eventIdNum);
+                    console.log(`Event ${row.eventIdNum} has ${rsvps.length} RSVPs:`, rsvps);
+                    
+                    const myRsvp = (rsvps || []).find((x: any) => {
+                      const match = Number(x.inviteRecipientId) === Number(resolvedUserId);
+                      console.log(`  RSVP inviteRecipientId=${x.inviteRecipientId}, status=${x.status}, match=${match}`);
+                      return match;
+                    });
+                    
+                    if (myRsvp) {
+                      console.log(`Found my RSVP:`, myRsvp);
+                      console.log(`Status: "${myRsvp.status}", checking if accepted...`);
+                    }
+                    
+                    // IMPORTANT: Only show if user has accepted the invitation
+                    if (myRsvp && (
+                      myRsvp.status === 'accepted' || 
+                      myRsvp.status === 'yes'
+                    )) {
+                      console.log(`✅ Adding event ${row.eventIdNum} to list (status: ${myRsvp.status})`);
+                      row.title = prefix ? `${prefix}${sanitize(String(row.title || ''))}` : String(row.title || '');
+                      row.rsvpStatus = myRsvp.status ?? null;
+                      row.rsvpId = myRsvp.rsvpId ?? myRsvp.rsvpId;
+                      allRows.push(row);
+                    } else {
+                      console.log(`❌ Not adding event ${row.eventIdNum} (no accepted RSVP)`);
+                    }
+                  } catch (e) {
+                    console.warn(`Failed to check RSVPs for event ${row.eventIdNum}:`, e);
+                  }
                 }
               }
             } catch (e) {
-              // ignore RSVP fetch errors
+              console.warn(`Failed to load events for friend ${fid}:`, e);
             }
           }
 
-          // sort aggregated rows by start time (best-effort using when string fallback)
-          allRows.sort((a,b) => {
+          console.log(`Total accepted events: ${allRows.length}`);
+
+          // sort aggregated rows by start time
+          allRows.sort((a, b) => {
             try {
               const aDate = new Date(a.when);
               const bDate = new Date(b.when);
               return (aDate.getTime() || 0) - (bDate.getTime() || 0);
             } catch { return 0; }
           });
+          
           setEvents(allRows);
         }
       } catch (err) {
@@ -237,11 +282,6 @@ export default function EventsScreen() {
   }
 
   async function openInviteForEvent(eventId?: number, ownerId?: number | null) {
-    console.log('=== openInviteForEvent ===');
-    console.log('eventId:', eventId);
-    console.log('ownerId:', ownerId);
-    console.log('currentUserId:', currentUserId);
-    
     if (!eventId) return;
     // close the detail modal (selected) so the invite modal isn't covered
     try { setSelected(null); setSelectedBody(null); } catch (_) { /* ignore */ }

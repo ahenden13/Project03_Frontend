@@ -28,7 +28,7 @@ export default function CalendarScreen() {
   const [showMine, setShowMine] = useState(true); // My availability
   const [showFriends, setShowFriends] = useState(true); // Friends' availability
   const [showMyEvents, setShowMyEvents] = useState(true); // My events
-  // invited events toggle removed per request
+  const [showInvitedEvents, setShowInvitedEvents] = useState(true); // Invited events (accepted RSVPs)
 
   // ---------------------------
   // UI & data state (top-level)
@@ -41,7 +41,7 @@ export default function CalendarScreen() {
   const [myAvailability, setMyAvailability] = useState<any[]>([]);
   const [friendAvailability, setFriendAvailability] = useState<any[]>([]);
   const [myEvents, setMyEvents] = useState<any[]>([]);
-  // invitedEvents removed
+  const [invitedEvents, setInvitedEvents] = useState<any[]>([]);
   const [loadingData, setLoadingData] = useState<boolean>(false);
 
   // initial data arrays are empty and will be populated from db
@@ -59,6 +59,14 @@ export default function CalendarScreen() {
     // Add my events (if enabled)
     if (showMyEvents) {
       myEvents.forEach((item) => {
+        if (!map[item.date]) map[item.date] = [];
+        map[item.date].push(item);
+      });
+    }
+
+    // Add invited events (if enabled)
+    if (showInvitedEvents) {
+      invitedEvents.forEach((item) => {
         if (!map[item.date]) map[item.date] = [];
         map[item.date].push(item);
       });
@@ -85,9 +93,11 @@ export default function CalendarScreen() {
     showMine,
     showFriends,
     showMyEvents,
+    showInvitedEvents,
     myAvailability,
     friendAvailability,
     myEvents,
+    invitedEvents,
     currentUserId,
   ]);
 
@@ -322,6 +332,7 @@ export default function CalendarScreen() {
     const renderPill = (it: any, idx: number) => {
       const colorForEntry = (owner?: string, kind?: string) => {
         if (!owner && !kind) return { bg: t.color.accent, border: '#1f74e6' };
+        if (owner === 'invited' && kind === 'event') return { bg: '#FF9500', border: '#cc7700' };
         if (owner === 'friend' && kind === 'event') return { bg: '#AF52DE', border: '#8b32c6' };
         if (owner === 'friend' && kind === 'free') return { bg: '#34C759', border: '#2f9e4a' };
         if (owner === 'mine' && kind === 'event') return { bg: '#FF3B30', border: '#d12a24' };
@@ -420,7 +431,7 @@ export default function CalendarScreen() {
       setMyEvents([]);
       setMyAvailability([]);
       setFriendAvailability([]);
-      // invitedEvents removed
+      setInvitedEvents([]);
       if (mountedRef.current) setLoadingData(false);
       return;
     }
@@ -432,7 +443,16 @@ export default function CalendarScreen() {
       const myFt = await db.getFreeTimeForUser(currentUserId);
 
       // friends' free time
-      const friendIds = await db.getFriendsForUser(currentUserId);
+      const friendships = await db.getFriendsForUser(currentUserId);
+      // Extract the actual friend user IDs from friendship objects
+      const friendIds = friendships.map((f: any) => {
+        // Get the OTHER user's ID (not your own)
+        const friendId = Number(f.userId) === Number(currentUserId) 
+          ? Number(f.friendId) 
+          : Number(f.userId);
+        return friendId;
+      });
+      
       const friendEntries: any[] = [];
       await Promise.all(friendIds.map(async (fid) => {
         const fFree = await db.getFreeTimeForUser(fid);
@@ -491,10 +511,70 @@ export default function CalendarScreen() {
         kind: (f.isEvent === 0 || f.isEvent === false) ? 'free' : 'event',
       })).filter((x: any) => !!x.date);
 
+      // Load invited events (events from friends that user has accepted RSVPs for)
+      console.log('=== Loading Invited Events for Calendar ===');
+      console.log('Current userId:', currentUserId);
+      console.log('Friend IDs:', friendIds);
+      
+      const invitedEntries: any[] = [];
+      for (const fid of friendIds) {
+        try {
+          console.log(`Loading events for friend ${fid}...`);
+          const friendEvents = await db.getEventsForUser(fid);
+          console.log(`Friend ${fid} has ${friendEvents.length} events`);
+          
+          const u = await db.getUserById(fid);
+          const friendName = u?.username ?? `user:${fid}`;
+          
+          for (const event of friendEvents) {
+            const isEventFlag = event.isEvent === 1 || event.isEvent === true;
+            if (!isEventFlag) continue; // skip availability/free time
+            
+            if (event.eventId) {
+              try {
+                console.log(`Checking RSVPs for event ${event.eventId}...`);
+                const rsvps = await db.getRsvpsForEvent(event.eventId);
+                console.log(`Event ${event.eventId} has ${rsvps.length} RSVPs:`, rsvps);
+                
+                const myRsvp = rsvps.find((r: any) => Number(r.inviteRecipientId) === Number(currentUserId));
+                console.log(`My RSVP for event ${event.eventId}:`, myRsvp);
+                
+                // Only include if user has ACCEPTED the invitation
+                if (myRsvp && myRsvp.status === 'accepted') {
+                  console.log(`✓ Including accepted event ${event.eventId}`);
+                  invitedEntries.push({ ...event, name: friendName });
+                } else {
+                  console.log(`✗ Skipping event ${event.eventId} - status: ${myRsvp?.status || 'no RSVP'}`);
+                }
+              } catch (e) {
+                console.warn(`Failed to check RSVPs for event ${event.eventId}`, e);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to load events for friend ${fid}`, e);
+        }
+      }
+      
+      console.log(`Total invited events found: ${invitedEntries.length}`);
+
+      const normalizedInvited = invitedEntries.map((f: any) => ({
+        ...f,
+        date: f.date ? (typeof f.date === 'string' && f.date.length >= 10 ? f.date.slice(0, 10) : normalizeDate(f.date)) : normalizeDate(f.startTime),
+        time: f.startTime ? fmtTime(f.startTime) : f.time ?? '',
+        title: f.eventTitle ?? f.title ?? f.name ?? 'Event',
+        owner: 'invited',
+        kind: 'event',
+      })).filter((x: any) => !!x.date);
+
+      console.log('Normalized invited events:', normalizedInvited);
+
       // Update state if still mounted
       setMyEvents(normalizedMyEvents);
       setMyAvailability(normalizedMyFree);
       setFriendAvailability(normalizedFriends);
+      setInvitedEvents(normalizedInvited);
+      console.log('Calendar state updated with invited events');
   // Debug: summary of loaded counts (commented out by request)
   // eslint-disable-next-line no-console
   // console.log('Calendar: loadData result', { myEvents: normalizedMyEvents.length, myFree: normalizedMyFree.length, friends: normalizedFriends.length });
@@ -504,7 +584,7 @@ export default function CalendarScreen() {
     } finally {
       if (mountedRef.current) setLoadingData(false);
     }
-  }, [currentUserId, showMine, showFriends, showMyEvents]);
+  }, [currentUserId, showMine, showFriends, showMyEvents, showInvitedEvents]);
 
   // Call loadData on mount and when dependencies change
   useEffect(() => {
@@ -713,6 +793,7 @@ export default function CalendarScreen() {
               {entries.map((it: any, i: number) => {
                 const colorForEntry = (owner?: string, kind?: string) => {
                   if (!owner && !kind) return t.color.accent;
+                  if (owner === 'invited' && kind === 'event') return '#FF9500';
                   if (owner === 'friend' && kind === 'event') return '#AF52DE';
                   if (owner === 'friend' && kind === 'free') return '#34C759';
                   if (owner === 'mine' && kind === 'event') return '#FF3B30';
@@ -1160,7 +1241,20 @@ export default function CalendarScreen() {
           </Text>
         </TouchableOpacity>
 
-        {/* Invited Events toggle removed */}
+        {/* Toggle Invited Events */}
+        <TouchableOpacity
+          onPress={() => setShowInvitedEvents(!showInvitedEvents)}
+          style={{
+            marginRight: 10,
+            paddingVertical: 6,
+            paddingHorizontal: 10,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ color: showInvitedEvents ? "#FF9500" : t.color.textMuted }}>
+            Invited Events
+          </Text>
+        </TouchableOpacity>
 
       </View>
   {/* spacer removed per request (programmatic scroll + padding remain) */}

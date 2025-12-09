@@ -122,8 +122,25 @@ export default function NotificationsScreen() {
       console.log('=== Fetching RSVPs for user:', resolvedUserId, '===');
       const allRsvps = await db.getRsvpsForUser(resolvedUserId) || [];
       console.log('All RSVPs from DB:', allRsvps);
-      const pending = (allRsvps || []).filter((r: any) => String(r.status) === 'pending');
-      console.log('Pending RSVPs:', pending);
+      
+      // Log each RSVP's status
+      allRsvps.forEach((r: any, i: number) => {
+        console.log(`RSVP ${i}:`, {
+          rsvpId: r.rsvpId,
+          status: r.status,
+          statusType: typeof r.status,
+          statusValue: JSON.stringify(r.status)
+        });
+      });
+      
+      // IMPORTANT: Backend uses 'no-reply' as the pending status, not 'pending'
+      const pending = (allRsvps || []).filter((r: any) => {
+        const status = String(r.status || '').trim();
+        const isMatch = status === 'no-reply' || status === 'pending';
+        console.log(`Filtering RSVP: status="${status}", matches=${isMatch}`);
+        return isMatch;
+      });
+      console.log('Filtered pending RSVPs:', pending);
       
       const enrichedRsvps = await Promise.all(pending.map(async (r: any) => {
         try {
@@ -260,29 +277,37 @@ export default function NotificationsScreen() {
                     <View style={styles.actions}>
                       <Button title="Accept" onPress={async () => {
                         try {
-                          console.log('Accepting RSVP:', item.row.rsvpId);
+                          console.log('=== Accepting RSVP ===');
+                          console.log('rsvpId:', item.row.rsvpId);
                           setLoading(true);
-                          if (db.updateRsvp) {
-                            try { await db.updateRsvp(item.row.rsvpId, 'accepted'); } catch (_) { await db.updateRsvp(item.row.rsvpId, { status: 'accepted' }); }
-                          } else if (db.respondRsvp) {
-                            await db.respondRsvp(item.row.rsvpId, 'accepted');
-                          }
+                          
+                          // Call updateRsvp with proper object format
+                          await db.updateRsvp(item.row.rsvpId, { status: 'accepted' });
+                          
                           console.log('RSVP accepted successfully');
-                        } catch (e) { console.warn('accept rsvp failed', e); }
-                        await loadNotifications();
+                        } catch (e) { 
+                          console.error('Accept RSVP failed:', e);
+                          alert('Failed to accept invitation. Please try again.');
+                        } finally {
+                          await loadNotifications();
+                        }
                       }} />
                       <Button title="Decline" onPress={async () => {
                         try {
-                          console.log('Declining RSVP:', item.row.rsvpId);
+                          console.log('=== Declining RSVP ===');
+                          console.log('rsvpId:', item.row.rsvpId);
                           setLoading(true);
-                          if (db.updateRsvp) {
-                            try { await db.updateRsvp(item.row.rsvpId, 'declined'); } catch (_) { await db.updateRsvp(item.row.rsvpId, { status: 'declined' }); }
-                          } else if (db.respondRsvp) {
-                            await db.respondRsvp(item.row.rsvpId, 'declined');
-                          }
+                          
+                          // Call updateRsvp with proper object format
+                          await db.updateRsvp(item.row.rsvpId, { status: 'declined' });
+                          
                           console.log('RSVP declined successfully');
-                        } catch (e) { console.warn('decline rsvp failed', e); }
-                        await loadNotifications();
+                        } catch (e) { 
+                          console.error('Decline RSVP failed:', e);
+                          alert('Failed to decline invitation. Please try again.');
+                        } finally {
+                          await loadNotifications();
+                        }
                       }} />
                     </View>
                   </View>
