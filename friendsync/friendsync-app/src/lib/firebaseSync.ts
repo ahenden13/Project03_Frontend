@@ -45,22 +45,11 @@ export async function syncUserToFirebase(userData: {
   email: string;
   password?: string;
   phone_number?: string | null;
-  firebaseUid?: string; // ← NEW: Firebase UID to use as document ID
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    // Use Firebase UID as document ID if provided, otherwise fall back to email
-    let docId: string;
-    if (userData.firebaseUid) {
-      docId = userData.firebaseUid;
-    } else {
-      // Fallback: use email-based ID if no Firebase UID provided
-      docId = userData.email.toLowerCase().replace(/[^a-z0-9@._-]/g, '_');
-      console.warn('No Firebase UID provided, using email-based ID:', docId);
-    }
-    
-    const userRef = doc(firestore, 'users', docId);
+    // Use numeric userId as document ID to avoid relying on firebase UIDs
+    const userRef = doc(firestore, 'users', String(userData.userId));
     
     // Check if document exists to determine if we need createdAt
     const docSnap = await getDoc(userRef);
@@ -73,13 +62,15 @@ export async function syncUserToFirebase(userData: {
       phoneNumber: userData.phone_number || null,
       updatedAt: serverTimestamp(),
     };
+    // Include backend/server ID mapping if present
+    if ((userData as any).remote_user_id) userDataFirebase.remote_user_id = (userData as any).remote_user_id;
     
     // Only set createdAt for new documents
     if (isNewDoc) {
       userDataFirebase.createdAt = serverTimestamp();
-      console.log(`✨ Creating new user ${userData.email} (uid: ${docId})`);
+      console.log(`✨ Creating new user ${userData.email} (id: ${userRef.id})`);
     } else {
-      console.log(`📝 Updating existing user ${userData.email} (uid: ${docId})`);
+      console.log(`📝 Updating existing user ${userData.email} (id: ${userRef.id})`);
     }
     
     await setDoc(userRef, userDataFirebase, { merge: true });
@@ -97,35 +88,20 @@ export async function updateUserInFirebase(
     username?: string;
     email?: string;
     phone_number?: string | null;
-  },
-  firebaseUid?: string // ← NEW: Optional Firebase UID
+  }
 ): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    let userRef;
-    
-    if (firebaseUid) {
-      // Use Firebase UID directly if provided
-      userRef = doc(firestore, 'users', firebaseUid);
-    } else {
-      // Find the document by userId field
-      const usersRef = collection(firestore, 'users');
-      const userQuery = query(usersRef, where('userId', '==', userId));
-      const userDocs = await getDocs(userQuery);
-      
-      if (userDocs.empty) {
-        console.warn(`No user found with userId ${userId} in Firebase`);
-        return;
-      }
-      
-      userRef = userDocs.docs[0].ref;
-    }
+    const userRef = doc(firestore, 'users', String(userId));
     
     const firestoreUpdates: any = {
       ...updates,
       updatedAt: serverTimestamp(),
     };
+    if ((updates as any).remote_user_id !== undefined) {
+      firestoreUpdates.remote_user_id = (updates as any).remote_user_id ?? '';
+      delete (firestoreUpdates as any).remote_user_id;
+    }
     
     // Rename phone_number to phoneNumber for Firestore
     if (updates.phone_number !== undefined) {
@@ -140,27 +116,10 @@ export async function updateUserInFirebase(
   }
 }
 
-export async function deleteUserFromFirebase(userId: number, firebaseUid?: string): Promise<void> {
+export async function deleteUserFromFirebase(userId: number): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    if (firebaseUid) {
-      // Use Firebase UID directly if provided
-      await deleteDoc(doc(firestore, 'users', firebaseUid));
-    } else {
-      // Find the user document by userId field
-      const usersRef = collection(firestore, 'users');
-      const userQuery = query(usersRef, where('userId', '==', userId));
-      const userDocs = await getDocs(userQuery);
-      
-      if (userDocs.empty) {
-        console.warn(`No user found with userId ${userId} in Firebase`);
-        return;
-      }
-      
-      // Delete the user document
-      await deleteDoc(userDocs.docs[0].ref);
-    }
+    await deleteDoc(doc(firestore, 'users', String(userId)));
     
     // Clean up related data in parallel
     const [prefsSnapshot, eventsSnapshot, friendsSnapshot] = await Promise.all([
@@ -197,7 +156,6 @@ export async function syncEventToFirebase(eventData: {
   date?: string | null;
   isEvent?: number;
   recurring?: number;
-  userFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -210,7 +168,6 @@ export async function syncEventToFirebase(eventData: {
     const eventDataFirebase: any = {
       eventId: eventData.eventId,
       userId: eventData.userId,
-      userFirebaseUid: eventData.userFirebaseUid ?? null,
       eventTitle: eventData.eventTitle || null,
       description: eventData.description || null,
       startTime: eventData.startTime,
@@ -289,8 +246,6 @@ export async function syncFriendRequestToFirebase(friendData: {
   userId: number;
   friendId: number;
   status: string;
-  userFirebaseUid?: string | null;
-  friendFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -303,9 +258,7 @@ export async function syncFriendRequestToFirebase(friendData: {
     const friendDataFirebase: any = {
       friendRowId: friendData.friendRowId,
       userId: friendData.userId,
-      userFirebaseUid: friendData.userFirebaseUid ?? null,
       friendId: friendData.friendId,
-      friendFirebaseUid: friendData.friendFirebaseUid ?? null,
       status: friendData.status,
       updatedAt: serverTimestamp(),
     };
@@ -362,8 +315,6 @@ export async function syncRsvpToFirebase(rsvpData: {
   eventOwnerId: number;
   inviteRecipientId: number;
   status: string;
-  eventOwnerFirebaseUid?: string | null;
-  inviteRecipientFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -377,9 +328,7 @@ export async function syncRsvpToFirebase(rsvpData: {
       rsvpId: rsvpData.rsvpId,
       eventId: rsvpData.eventId,
       eventOwnerId: rsvpData.eventOwnerId,
-      eventOwnerFirebaseUid: rsvpData.eventOwnerFirebaseUid ?? null,
       inviteRecipientId: rsvpData.inviteRecipientId,
-      inviteRecipientFirebaseUid: rsvpData.inviteRecipientFirebaseUid ?? null,
       status: rsvpData.status,
       updatedAt: serverTimestamp(),
     };
@@ -436,7 +385,6 @@ export async function syncNotificationToFirebase(notifData: {
   notifMsg: string;
   notifType?: string | null;
   createdAt?: string;
-  userFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -445,7 +393,6 @@ export async function syncNotificationToFirebase(notifData: {
     await setDoc(notifRef, {
       notificationId: notifData.notificationId,
       userId: notifData.userId,
-      userFirebaseUid: notifData.userFirebaseUid ?? null,
       notifMsg: notifData.notifMsg,
       notifType: notifData.notifType || null,
       createdAt: notifData.createdAt || new Date().toISOString(),
@@ -484,15 +431,13 @@ export async function syncUserPreferencesToFirebase(
     theme?: number;
     notificationEnabled?: number;
     colorScheme?: number;
-  },
-  userFirebaseUid?: string | null
+  }
 ): Promise<void> {
   try {
     const firestore = await getFirestore();
     const prefsRef = doc(firestore, 'user_prefs', String(userId));
     
     await setDoc(prefsRef, {
-      userFirebaseUid: userFirebaseUid ?? null,
       userId,
       theme: prefs.theme ?? 0,
       notificationEnabled: prefs.notificationEnabled ?? 1,

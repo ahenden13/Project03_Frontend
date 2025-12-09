@@ -6,11 +6,14 @@ import HomeScreen from '../screens/HomeScreen';
 import ApiTestScreen from '../screens/ApiTestScreen';
 // NEW: imports for auth state and sign-out
 import { useAuth } from '../features/auth/AuthProvider';
-import { auth } from '../lib/firebase.native';
+import firebase from '../lib/firebase';
 import db from '../lib/db';
 import { useEffect, useState } from 'react';
 import storage from '../lib/storage';
 import { on as onEvent } from '../lib/eventBus';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as simpleSync from '../lib/sync';
+import { signOut as firebaseSignOut } from 'firebase/auth';
 
 export default function TopNav({ navigation }: StackHeaderProps) {
   const t = useTheme();
@@ -23,23 +26,11 @@ export default function TopNav({ navigation }: StackHeaderProps) {
     (async () => {
       try {
         await db.init_db();
-        // Prefer resolving by the currently signed-in Firebase UID when available
+        // Resolve local numeric user id (avoid relying on provider-specific IDs)
         let uidToUse: number | null = null;
         try {
-          if (user && user.uid) {
-            const byUid = await db.getUserByFirebaseUid(String(user.uid));
-            if (byUid && byUid.userId) uidToUse = Number(byUid.userId);
-          }
-        } catch (e) {
-          // ignore lookup errors
-        }
-
-        // If not found via auth UID, fall back to stored mappings
-        if (uidToUse == null) {
-          try {
-            uidToUse = await db.resolveLocalUserId();
-          } catch (e) { /* ignore */ }
-        }
+          uidToUse = await db.resolveLocalUserId();
+        } catch (e) { /* ignore */ }
 
         if (!mounted) return;
         if (uidToUse != null) {
@@ -152,9 +143,50 @@ export default function TopNav({ navigation }: StackHeaderProps) {
             {/* jUSTIN: Sign Out button when signed in */}
             {signedIn && (
               <TouchableOpacity
-                onPress={() => {
-                  auth.signOut();
-                  console.log('[Auth] User signed out');
+                onPress={async () => {
+                  try {
+                    // Stop auto-sync first
+                    try { simpleSync.stopAutoSync(); } catch (_) { /* ignore */ }
+
+                    // Resolve firebase instance robustly (same pattern used elsewhere)
+                    let fb: any = firebase;
+                    if (!fb || !fb.auth) {
+                      try {
+                        const mod = await import('../lib/firebase');
+                        fb = (mod as any).default || mod;
+                      } catch (e) {
+                        try {
+                          const mod = await import('../lib/firebase.web');
+                          fb = { auth: (mod as any).auth };
+                        } catch (e2) {
+                          try { const mod = await import('../lib/firebase.native'); fb = { auth: (mod as any).auth }; } catch (_) { fb = null; }
+                        }
+                      }
+                    }
+
+                    if (fb && fb.auth) {
+                      try {
+                        // prefer the firebase/auth signOut helper
+                        await firebaseSignOut(fb.auth as any);
+                      } catch (e) {
+                        // fallback to instance method if helper fails
+                        try { if (typeof fb.auth.signOut === 'function') await fb.auth.signOut(); } catch (e2) { console.warn('[TopNav] signOut fallback failed', e2); }
+                      }
+                    } else {
+                      console.warn('[TopNav] No firebase.auth available to sign out');
+                    }
+
+                    // Clear local stored auth/session keys
+                    try { await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']); } catch (_) { /* ignore */ }
+                    try { await storage.removeItem('authToken'); await storage.removeItem('userId'); await storage.removeItem('userEmail'); await storage.removeItem('userName'); } catch (_) { /* ignore */ }
+
+                    // Notify other parts of the app
+                    try { const ev = (await import('../lib/eventBus')).emit; ev('auth:signedout'); } catch (_) { /* ignore */ }
+
+                    console.log('[Auth] User signed out');
+                  } catch (e) {
+                    console.warn('[TopNav] signOut failed', e);
+                  }
                 }}
                 activeOpacity={0.7}
                 style={{

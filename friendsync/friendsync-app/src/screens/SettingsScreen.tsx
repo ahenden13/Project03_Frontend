@@ -7,11 +7,15 @@ import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
 
 // added 
-import { auth } from "../lib/firebase";
+// note: do not import firebase auth here; use AuthProvider/ctx instead
 import { useAuth } from "../features/auth/AuthProvider";
+import firebase from "../lib/firebase";
 import db from '../lib/db';
 import { emit, on as onEvent } from '../lib/eventBus';
 import storage from '../lib/storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as simpleSync from '../lib/sync';
+import { signOut as firebaseSignOut } from 'firebase/auth';
 import { MaterialIcons } from '@expo/vector-icons';
 
 
@@ -93,20 +97,9 @@ export default function SettingsScreen() {
     (async () => {
       try {
         await db.init_db();
-        // Prefer resolving by currently signed-in Firebase UID
+        // Resolve local user id (numeric) — avoid relying on firebase UID
         let uid: number | null = null;
-        try {
-          const firebaseUid = authCtx.user?.uid;
-          if (firebaseUid) {
-            const byUid = await db.getUserByFirebaseUid(String(firebaseUid));
-            if (byUid && byUid.userId) uid = Number(byUid.userId);
-          }
-        } catch (e) { /* ignore */ }
-
-        // Fallback to stored mapping if not found via UID
-        if (uid == null) {
-          try { uid = await db.resolveLocalUserId(); } catch (_) { uid = null; }
-        }
+        try { uid = await db.resolveLocalUserId(); } catch (_) { uid = null; }
 
         if (!mounted) return;
         setCurrentUserId(uid);
@@ -187,8 +180,7 @@ export default function SettingsScreen() {
                         // If no local user exists, create one and persist the new userId
                         if (currentUserId == null) {
                           const email = authCtx.user?.email || (await storage.getItem('userEmail')) || '';
-                          const firebaseUid = authCtx.user?.uid || (await storage.getItem('firebaseUid')) || undefined;
-                          const newId = await db.createUser({ username: editingName, email: email, firebaseUid });
+                          const newId = await db.createUser({ username: editingName, email: email });
                           try { await storage.setItem('userId', newId); } catch (e) { /* ignore */ }
                           setCurrentUserId(newId);
                           try { await storage.setItem('userName', editingName); } catch (e) { /* ignore */ }
@@ -261,9 +253,22 @@ export default function SettingsScreen() {
         <Text style={{ color: t.color.textMuted, marginBottom: 8 }}>Signed in as {editingName || authCtx.user?.email}</Text>
 
         <TouchableOpacity
-          onPress={() => {
-            auth.signOut();
-            console.log("[Auth] User signed out");
+          onPress={async () => {
+            try {
+              try { simpleSync.stopAutoSync(); } catch (_) { }
+              // Resolve firebase module
+              let fb: any = firebase;
+              if (!fb || !fb.auth) {
+                try { const mod = await import('../lib/firebase'); fb = (mod as any).default || mod; } catch (_) { fb = null; }
+              }
+              if (fb && fb.auth) {
+                try { await firebaseSignOut(fb.auth as any); } catch (e) { try { if (typeof fb.auth.signOut === 'function') await fb.auth.signOut(); } catch (_) { console.warn('Settings: signOut failed', e); } }
+              }
+              try { await AsyncStorage.multiRemove(['authToken','userId','userEmail','userName']); } catch (_) { }
+              try { await storage.removeItem('authToken'); await storage.removeItem('userId'); await storage.removeItem('userEmail'); await storage.removeItem('userName'); } catch (_) { }
+              try { emit('auth:signedout'); } catch (_) { }
+              console.log("[Auth] User signed out");
+            } catch (e) { console.warn('Settings: signOut error', e); }
           }}
           activeOpacity={0.8}
           style={{
