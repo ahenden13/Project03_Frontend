@@ -208,7 +208,7 @@ export default function WelcomeScreen() {
         </TouchableOpacity>
         
 
-        {__DEV__ && (secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
+        {(secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
           <View style={{ marginTop: t.space.lg, width: "80%" }}>
             {loading ? (
               <ActivityIndicator size="small" color={t.color.accent} />
@@ -222,7 +222,7 @@ export default function WelcomeScreen() {
           </View>
         ) : null}
 
-        {__DEV__ && (secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
+        {(secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
           <View style={{ marginTop: t.space.md, width: '80%', alignItems: 'stretch' }}>
             <View style={{ marginTop: t.space.sm }}>
               <Button title="Hide debug" onPress={() => { setSecretRevealed(false); setDump(null); setStatus(null); }} color={t.color.accent} />
