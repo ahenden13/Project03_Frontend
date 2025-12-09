@@ -1,0 +1,31 @@
+name: Frontend Tests (Simple)
+
+on:
+  pull_request:
+    branches:
+      - main
+      
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: friendsync/friendsync-app/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: ./friendsync/friendsync-app
+        run: npm ci
+      
+      - name: Run Jest tests
+        working-directory: ./friendsync/friendsync-app
+        run: npm test
+        env:
+          CI: true

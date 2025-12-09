@@ -10,6 +10,7 @@ import SettingsScreen from '../screens/SettingsScreen';
 import NotificationsScreen from '../screens/NotificationsScreen';
 import WelcomeScreen from '../screens/WelcomeScreen';
 import ApiTestScreen from '../screens/ApiTestScreen';
+import DedupeDebugScreen from '../screens/DedupeDebugScreen';
 
 // auth hook
 import { useAuth } from '../features/auth/AuthProvider';
@@ -72,6 +73,7 @@ export default function RootNavigator() {
             component={SettingsScreen}
             options={{ title: 'Settings' }}
           />
+          {__DEV__ ? <Stack.Screen name="DedupeDebug" component={DedupeDebugScreen} options={{ title: 'Dedupe Debug' }} /> : null}
           <Stack.Screen
             name="Notifications"
             component={NotificationsScreen}

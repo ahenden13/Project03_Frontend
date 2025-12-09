@@ -21,9 +21,12 @@
 import { Platform } from 'react-native';
 import storage from './storage';
 import * as FirebaseSync from './firebaseSync';
+import { emit } from './eventBus';
 
 // ⚠️ TEMPORARILY DISABLE FIREBASE SYNC TO STOP DUPLICATES
 // FirebaseSync.setFirebaseSyncEnabled(false);  // ← ADD THIS LINE!
+
+const API_BASE_URL = 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com';
 
 const FALLBACK_KEY = 'fallback_db_v1';
 
@@ -42,6 +45,7 @@ type DBShape = {
 let nativeDb: any = null;
 let useNative = false;
 let initialized = false;
+let fallbackSaveLock: Promise<void> | null = null;
 
 async function tryInitNative() {
   if (useNative || Platform.OS === 'web') return;
@@ -81,12 +85,12 @@ async function loadFallback(): Promise<DBShape> {
   // Normalize/validate existing shape
   const normalized: DBShape = {
     __meta__: (val.__meta__ && typeof val.__meta__ === 'object') ? val.__meta__ : { nextId: {} },
-    users: Array.isArray(val.users) ? val.users : [],
-    friends: Array.isArray(val.friends) ? val.friends : [],
-    rsvps: Array.isArray(val.rsvps) ? val.rsvps : [],
-    user_prefs: Array.isArray(val.user_prefs) ? val.user_prefs : [],
-    events: Array.isArray(val.events) ? val.events : [],
-    notifications: Array.isArray(val.notifications) ? val.notifications : [],
+    users: Array.isArray(val.users) ? val.users.map((u: any) => ({ userId: Number(u.userId ?? 0), email: u.email ?? '', username: u.username ?? '', phone_number: u.phone_number ?? u.phoneNumber ?? '', firebase_uid: u.firebase_uid ?? u.firebaseUid ?? '', remote_user_id: (u.remote_user_id ?? u.remoteId ?? u.serverId ?? u.userId ?? '') })) : [],
+    friends: Array.isArray(val.friends) ? val.friends.map((f: any) => ({ friendRowId: Number(f.friendRowId ?? 0), userId: Number(f.userId ?? 0), friendId: Number(f.friendId ?? 0), status: f.status ?? 'pending' })) : [],
+    rsvps: Array.isArray(val.rsvps) ? val.rsvps.map((r: any) => ({ rsvpId: Number(r.rsvpId ?? 0), createdAt: r.createdAt ?? '', eventId: Number(r.eventId ?? 0), eventOwnerId: Number(r.eventOwnerId ?? 0), inviteRecipientId: Number(r.inviteRecipientId ?? 0), status: r.status ?? 'pending', updatedAt: r.updatedAt ?? '' })) : [],
+    user_prefs: Array.isArray(val.user_prefs) ? val.user_prefs.map((p: any) => ({ preferenceId: Number(p.preferenceId ?? 0), userId: Number(p.userId ?? 0), colorScheme: Number(p.colorScheme ?? 0), notificationEnabled: Number(p.notificationEnabled ?? 1), theme: Number(p.theme ?? 0), updatedAt: p.updatedAt ?? '' })) : [],
+    events: Array.isArray(val.events) ? val.events.map((e: any) => ({ eventId: Number(e.eventId ?? 0), userId: Number(e.userId ?? 0), eventTitle: e.eventTitle ?? e.title ?? '', description: e.description ?? '', startTime: e.startTime ?? '', endTime: e.endTime ?? '', date: e.date ?? '', isEvent: Number(e.isEvent ?? 1), recurring: Number(e.recurring ?? 0) })) : [],
+    notifications: Array.isArray(val.notifications) ? val.notifications.map((n: any) => ({ notificationId: Number(n.notificationId ?? 0), userId: Number(n.userId ?? 0), notifMsg: n.notifMsg ?? '', notifType: n.notifType ?? '', createdAt: n.createdAt ?? '' })) : [],
   };
 
   if (!normalized.__meta__ || typeof normalized.__meta__ !== 'object') normalized.__meta__ = { nextId: {} };
@@ -114,7 +118,23 @@ async function loadFallback(): Promise<DBShape> {
 }
 
 async function saveFallback(db: DBShape) {
-  await storage.setItem(FALLBACK_KEY, db);
+  const doSave = async () => {
+    try {
+      await storage.setItem(FALLBACK_KEY, db);
+    } catch (e) {
+      console.warn('db.saveFallback: failed to persist fallback DB', e);
+    }
+  };
+
+  if (fallbackSaveLock) {
+    // chain onto existing save to serialize writes
+    fallbackSaveLock = fallbackSaveLock.then(doSave, doSave);
+  } else {
+    fallbackSaveLock = doSave();
+  }
+
+  try { await fallbackSaveLock; } catch { /* already logged */ }
+  fallbackSaveLock = null;
 }
 
 function nextId(db: DBShape, table: keyof DBShape): number {
@@ -136,54 +156,72 @@ async function createNativeTables() {
   if (!useNative || !nativeDb) return;
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS events (
     eventId INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT,
-    description TEXT,
-    endTime TEXT,
-    eventTitle TEXT,
-    isEvent INTEGER,
-    recurring INTEGER,
-    startTime TEXT,
-    userId INTEGER
+    date TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    endTime TEXT DEFAULT '',
+    eventTitle TEXT DEFAULT '',
+    isEvent INTEGER DEFAULT 1,
+    recurring INTEGER DEFAULT 0,
+    startTime TEXT DEFAULT '',
+    userId INTEGER DEFAULT 0
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS friends (
     friendRowId INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER,
-    friendId INTEGER,
-    status TEXT
+    userId INTEGER DEFAULT 0,
+    friendId INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending'
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS rsvps (
     rsvpId INTEGER PRIMARY KEY AUTOINCREMENT,
-    createdAt TEXT,
-    eventId INTEGER,
-    eventOwnerId INTEGER,
-    inviteRecipientId INTEGER,
-    status TEXT,
-    updatedAt TEXT
+    createdAt TEXT DEFAULT '',
+    eventId INTEGER DEFAULT 0,
+    eventOwnerId INTEGER DEFAULT 0,
+    inviteRecipientId INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    updatedAt TEXT DEFAULT ''
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS user_prefs (
     preferenceId INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER,
-    colorScheme INTEGER,
-    notificationEnabled INTEGER,
-    theme INTEGER,
-    updatedAt TEXT
+    userId INTEGER DEFAULT 0,
+    colorScheme INTEGER DEFAULT 0,
+    notificationEnabled INTEGER DEFAULT 1,
+    theme INTEGER DEFAULT 0,
+    updatedAt TEXT DEFAULT ''
   );`);
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS users (
     userId INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT,
-    username TEXT
+    email TEXT DEFAULT '',
+    username TEXT DEFAULT ''
   );`);
+  // Add phone_number column with default to avoid missing fields on native DB
+  try {
+    await execSqlNative(nativeDb, `ALTER TABLE users ADD COLUMN phone_number TEXT DEFAULT ''`);
+  } catch (e) {
+    // ignore if column already exists or ALTER not supported
+  }
+  // Add firebase_uid column to store provider-specific UID for sign-in mapping
+  try {
+    await execSqlNative(nativeDb, `ALTER TABLE users ADD COLUMN firebase_uid TEXT DEFAULT ''`);
+  } catch (e) {
+    // ignore if column already exists or ALTER not supported
+  }
+  // Add remote_user_id to store backend/server-side user id mapping
+  try {
+    await execSqlNative(nativeDb, `ALTER TABLE users ADD COLUMN remote_user_id TEXT DEFAULT ''`);
+  } catch (e) {
+    // ignore if column already exists or ALTER not supported
+  }
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS notifications (
     notificationId INTEGER PRIMARY KEY AUTOINCREMENT,
-    notifMsg TEXT,
-    userId INTEGER,
-    notifType TEXT,
-    createdAt TEXT
+    notifMsg TEXT DEFAULT '',
+    userId INTEGER DEFAULT 0,
+    notifType TEXT DEFAULT '',
+    createdAt TEXT DEFAULT ''
   );`);
 }
 
@@ -195,6 +233,15 @@ export async function init_db() {
     await loadFallback();
   }
   initialized = true;
+  // Run a non-destructive dedupe dry-run at init for consistent detection
+  try {
+    const report = await runDuplicateCleanup({ dryRun: true });
+    if (report && report.groups && Array.isArray(report.groups) && report.groups.length > 0) {
+      console.warn('db.init_db: duplicate user groups detected (dry-run):', report.groups);
+    }
+  } catch (e) {
+    // ignore dedupe errors at startup
+  }
   return true;
 }
 
@@ -209,35 +256,70 @@ export async function createUser(user: {
   email: string; 
   password?: string; 
   phone_number?: string | null;
-  firebaseUid?: string; // ← ADD THIS
-}): Promise<number> {
+  firebase_uid?: string | null;
+  // accept camelCase for callers that pass firebaseUid
+  firebaseUid?: string | null;
+  remote_user_id?: string | null;
+}, opts?: { suppressOutbound?: boolean }): Promise<number> {
   await tryInitNative();
   let userId: number;
   
+  // Normalize firebase UID from either snake_case or camelCase
+  const fid = (user.firebase_uid ?? (user as any).firebaseUid) ?? '';
+
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username) VALUES (?, ?);', [user.email, user.username]);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid, remote_user_id) VALUES (?, ?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', fid ?? '', user.remote_user_id ?? '']);
     userId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     userId = nextId(db, 'users');
-    db.users.push({ userId, username: user.username, email: user.email });
+    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: fid ?? '', remote_user_id: user.remote_user_id ?? '' });
     await saveFallback(db);
   }
   
-  // Sync to Firebase with Firebase UID
+  // Sync to Firebase (using numeric userId as key)
   if (FirebaseSync.isFirebaseSyncEnabled() && userId) {
     try {
       await FirebaseSync.syncUserToFirebase({ 
-        ...user, 
         userId,
-        firebaseUid: user.firebaseUid // ← PASS THE FIREBASE UID
+        username: user.username ?? '',
+        email: user.email ?? '',
+        phone_number: user.phone_number ?? null,
+        remote_user_id: user.remote_user_id ?? null,
       });
     } catch (error) {
       console.warn('Failed to sync user to Firebase:', error);
     }
   }
+  // Emit outbound user created event so sync layer can push to backend API
+  try {
+    if (!opts || !opts.suppressOutbound) {
+      emit('outbound:userCreated', { userId, username: user.username ?? '', email: user.email ?? '', firebase_uid: user.firebase_uid ?? '', remote_user_id: user.remote_user_id ?? '' });
+    }
+  } catch (_) { }
   
   return userId;
+}
+
+// NOTE: We now optionally store a provider-specific `firebase_uid` on local users
+// to support mapping Firebase-authenticated users to numeric local `userId` values.
+// This value is optional and not used as the authoritative identity — numeric
+// `userId` remains the primary local identifier.
+
+export async function resolveLocalUserId(): Promise<number | null> {
+  try {
+    const storedId = await storage.getItem<any>('userId');
+    if (storedId != null) {
+      const asNum = Number(storedId);
+      if (!Number.isNaN(asNum)) {
+        const u = await getUserById(asNum);
+        if (u && u.userId) return Number(u.userId);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
 }
 
 export async function getUserById(userId: number): Promise<any | null> {
@@ -280,7 +362,90 @@ export async function getAllUsers(): Promise<any[]> {
   return db.users;
 }
 
-export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null; }) {
+// Repair helper: when backend/client previously stored provider UIDs in the
+// `username` column (and `firebase_uid` is empty), migrate those values into
+// `firebase_uid` and create a friendlier username derived from email or a
+// generated handle. Returns the number of rows updated.
+export async function repairFirebaseUidUsernames(): Promise<number> {
+  const looksLikeUid = (v: any) => {
+    if (!v) return false;
+    try {
+      const s = String(v);
+      if (s.includes('@') || s.includes(' ')) return false;
+      return /^[A-Za-z0-9_-]{12,256}$/.test(s);
+    } catch { return false; }
+  };
+
+  await tryInitNative();
+  let updated = 0;
+  if (useNative && nativeDb) {
+    const all: any = await execSqlNative(nativeDb, 'SELECT * FROM users;');
+    for (const u of (all.rows._array as any[])) {
+      try {
+        if ((!u.firebase_uid || String(u.firebase_uid).trim().length === 0) && looksLikeUid(u.username)) {
+          const newFid = String(u.username);
+          let newName = '';
+          if (u.email && String(u.email).includes('@')) newName = String(u.email).split('@')[0]; else newName = `u${Date.now()}`;
+          await execSqlNative(nativeDb, 'UPDATE users SET firebase_uid = ?, username = ? WHERE userId = ?;', [newFid, newName, u.userId]);
+          updated++;
+        }
+      } catch (e) { /* ignore per-row errors */ }
+    }
+    return updated;
+  }
+
+  const db = await loadFallback();
+  for (let i = 0; i < db.users.length; i++) {
+    const u = db.users[i];
+    try {
+      if ((!u.firebase_uid || String(u.firebase_uid).trim().length === 0) && looksLikeUid(u.username)) {
+        const newFid = String(u.username);
+        let newName = '';
+        if (u.email && String(u.email).includes('@')) newName = String(u.email).split('@')[0]; else newName = `u${Date.now()}`;
+        db.users[i] = { ...u, firebase_uid: newFid, username: newName };
+        updated++;
+      }
+    } catch (e) { /* ignore per-row errors */ }
+  }
+  if (updated > 0) await saveFallback(db);
+  return updated;
+}
+
+export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | null> {
+  if (!firebaseUid) return null;
+  await tryInitNative();
+  if (useNative && nativeDb) {
+    try {
+      const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE firebase_uid = ? LIMIT 1;', [firebaseUid]);
+      return (res.rows._array as any[])[0] ?? null;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  const db = await loadFallback();
+  const found = db.users.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(firebaseUid)) ?? null;
+  if (!found) return null;
+  // normalize returned shape to include camelCase `firebaseUid` for consumers/tests
+  return { ...found, firebaseUid: found.firebase_uid ?? found.firebaseUid ?? undefined };
+}
+
+export async function getUserByRemoteId(remoteId: string | number): Promise<any | null> {
+  if (remoteId == null) return null;
+  await tryInitNative();
+  const rid = String(remoteId);
+  if (useNative && nativeDb) {
+    try {
+      const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE remote_user_id = ? LIMIT 1;', [rid]);
+      return (res.rows._array as any[])[0] ?? null;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  const db = await loadFallback();
+  return db.users.find((u: any) => String(u.remote_user_id ?? '') === rid) ?? null;
+}
+
+export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null }) {
   await tryInitNative();
   
   if (useNative && nativeDb) {
@@ -288,6 +453,10 @@ export async function updateUser(userId: number, updates: { username?: string; e
     const params: any[] = [];
     if (updates.username !== undefined) { sets.push('username = ?'); params.push(updates.username); }
     if (updates.email !== undefined) { sets.push('email = ?'); params.push(updates.email); }
+    if (updates.username !== undefined) { /* handled above */ }
+    if (updates.phone_number !== undefined) { sets.push('phone_number = ?'); params.push(updates.phone_number ?? ''); }
+    if ((updates as any).firebase_uid !== undefined) { sets.push('firebase_uid = ?'); params.push((updates as any).firebase_uid ?? ''); }
+    if ((updates as any).remote_user_id !== undefined) { sets.push('remote_user_id = ?'); params.push((updates as any).remote_user_id ?? ''); }
     if (sets.length === 0) return;
     params.push(userId);
     await execSqlNative(nativeDb, `UPDATE users SET ${sets.join(', ')} WHERE userId = ?;`, params);
@@ -302,11 +471,14 @@ export async function updateUser(userId: number, updates: { username?: string; e
   // Sync to Firebase
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
+      // Update user in Firebase by numeric userId
       await FirebaseSync.updateUserInFirebase(userId, updates);
     } catch (error) {
       console.warn('Failed to update user in Firebase:', error);
     }
   }
+  // Emit outbound user updated so sync layer can push changes to backend
+  try { emit('outbound:userUpdated', { userId, updates }); } catch (_) { }
 }
 
 export async function deleteUser(userId: number) {
@@ -334,30 +506,181 @@ export async function deleteUser(userId: number) {
 // FRIENDS
 // ============================================================================
 
+// UPDATED sendFriendRequest - Send to API immediately
 export async function sendFriendRequest(userId: number, friendId: number): Promise<number> {
+  console.log('=== sendFriendRequest ===');
+  console.log('userId (sender):', userId);
+  console.log('friendId (receiver):', friendId);
+  
   await tryInitNative();
   let friendRowId: number;
   
-  if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO friends (userId, friendId, status) VALUES (?, ?, ?);', [userId, friendId, 'pending']);
-    friendRowId = res.insertId ?? 0;
-  } else {
-    const db = await loadFallback();
-    friendRowId = nextId(db, 'friends');
-    db.friends.push({ friendRowId, userId, friendId, status: 'pending' });
-    await saveFallback(db);
+  // STEP 1: Send to API first (for immediate cross-account sync)
+  try {
+    const apiUrl = `${API_BASE_URL}/api/friends/request`;
+    console.log('Sending to API:', apiUrl);
+    
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: String(userId),
+        friendId: String(friendId)
+      })
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      console.log('API response:', result);
+      
+      // Extract the friendRowId from API response
+      friendRowId = result.id || result.friendshipId || result.friendRowId || 0;
+      console.log('Friend request created with ID:', friendRowId);
+    } else {
+      throw new Error(`API returned ${response.status}`);
+    }
+  } catch (error) {
+    console.error('Failed to send friend request to API:', error);
+    throw error; // Don't proceed if API fails
   }
   
-  // Sync to Firebase
+  // STEP 2: Store in local database for offline access
+  if (useNative && nativeDb) {
+    try {
+      await execSqlNative(
+        nativeDb, 
+        'INSERT OR REPLACE INTO friends (friendRowId, userId, friendId, status) VALUES (?, ?, ?, ?);', 
+        [friendRowId, userId, friendId, 'pending']
+      );
+    } catch (e) {
+      console.warn('Failed to store in local DB:', e);
+    }
+  } else {
+    const db = await loadFallback();
+    // Check if already exists
+    const existingIndex = db.friends.findIndex((f: any) => f.friendRowId === friendRowId);
+    if (existingIndex === -1) {
+      db.friends.push({ friendRowId, userId, friendId, status: 'pending' });
+      await saveFallback(db);
+    }
+  }
+  
+  // STEP 3: Sync to Firebase (if needed - API might already do this)
   if (FirebaseSync.isFirebaseSyncEnabled() && friendRowId) {
     try {
-      await FirebaseSync.syncFriendRequestToFirebase({ friendRowId, userId, friendId, status: 'pending' });
+      await FirebaseSync.syncFriendRequestToFirebase({ 
+        friendRowId, 
+        userId, 
+        friendId, 
+        status: 'pending' 
+      });
     } catch (error) {
       console.warn('Failed to sync friend request to Firebase:', error);
     }
   }
   
+  // STEP 4: Emit event for other listeners
+  try { 
+    emit('outbound:friendCreated', { 
+      friendRowId, 
+      userId, 
+      friendId, 
+      status: 'pending' 
+    }); 
+  } catch (_) { }
+  
   return friendRowId;
+}
+
+// BONUS: Add this helper to accept/decline friend requests
+export async function respondToFriendRequest(
+  friendRowId: number, 
+  accept: boolean
+): Promise<void> {
+  console.log('=== respondToFriendRequest CALLED ===');
+  console.log('friendRowId:', friendRowId);
+  console.log('Type:', typeof friendRowId);
+  console.log('accept:', accept);
+  
+  const newStatus = accept ? 'accepted' : 'declined';
+  
+  // Update via API
+  try {
+    if (accept) {
+      // Accept the friend request
+      const apiUrl = `${API_BASE_URL}/api/friends/${friendRowId}/accept`;
+      console.log('Accepting friend request via API:', apiUrl);
+      const response = await fetch(apiUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+    } else {
+      // Decline/delete the friend request
+      const apiUrl = `${API_BASE_URL}/api/friends/${friendRowId}`;
+      console.log('Declining friend request via API:', apiUrl);
+      const response = await fetch(apiUrl, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+    }
+    
+    console.log('Friend request updated via API');
+  } catch (error) {
+    console.error('Failed to update via API:', error);
+    throw error;
+  }
+  
+  // Update local database
+  await tryInitNative();
+  if (accept) {
+    // Update status to accepted
+    if (useNative && nativeDb) {
+      await execSqlNative(
+        nativeDb,
+        'UPDATE friends SET status = ? WHERE friendRowId = ?;',
+        [newStatus, friendRowId]
+      );
+    } else {
+      const db = await loadFallback();
+      const friend = db.friends.find((f: any) => f.friendRowId === friendRowId);
+      if (friend) {
+        friend.status = newStatus;
+        await saveFallback(db);
+      }
+    }
+  } else {
+    // Delete the friend request
+    if (useNative && nativeDb) {
+      await execSqlNative(
+        nativeDb,
+        'DELETE FROM friends WHERE friendRowId = ?;',
+        [friendRowId]
+      );
+    } else {
+      const db = await loadFallback();
+      db.friends = db.friends.filter((f: any) => f.friendRowId !== friendRowId);
+      await saveFallback(db);
+    }
+  }
+  
+  // Sync to Firebase if needed
+  if (FirebaseSync.isFirebaseSyncEnabled()) {
+    try {
+      if (accept) {
+        await FirebaseSync.updateFriendRequestInFirebase(friendRowId, newStatus);
+      }
+    } catch (error) {
+      console.warn('Failed to sync to Firebase:', error);
+    }
+  }
 }
 
 export async function respondFriendRequest(friendRowId: number, accept: boolean) {
@@ -383,26 +706,192 @@ export async function respondFriendRequest(friendRowId: number, accept: boolean)
       console.warn('Failed to update friend request in Firebase:', error);
     }
   }
+
+  // If the request was accepted, ensure the accepter gets RSVPs for existing events
+  if (accept) {
+    try {
+      // Load the friend row to determine requester and recipient
+      let row: any = null;
+      if (useNative && nativeDb) {
+        try {
+          const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE friendRowId = ?;', [friendRowId]);
+          row = (res.rows._array as any[])[0] ?? null;
+        } catch (e) { row = null; }
+      } else {
+        try {
+          const fdb = await loadFallback();
+          row = fdb.friends.find((f: any) => f.friendRowId === friendRowId) ?? null;
+        } catch (e) { row = null; }
+      }
+
+      if (row) {
+        const requester = Number(row.userId);
+        const recipient = Number(row.friendId);
+        if (requester && recipient) {
+          // For each event owned by the requester, create an RSVP for the recipient if missing
+          const events = await getEventsForUser(requester);
+          for (const ev of events) {
+            try {
+              const existing = (await getRsvpsForEvent(Number(ev.eventId))) || [];
+              const has = existing.find((r: any) => Number(r.inviteRecipientId) === recipient);
+              if (!has) {
+                try { await createRsvp({ eventId: Number(ev.eventId), eventOwnerId: requester, inviteRecipientId: recipient, status: 'pending' }); } catch (_) { /* ignore per-item */ }
+              }
+            } catch (_) { /* ignore per-event */ }
+          }
+        }
+      }
+    } catch (e) {
+      // ignore background RSVP creation errors
+    }
+  }
 }
 
 export async function getFriendRequestsForUser(userId: number): Promise<any[]> {
+  console.log('=== getFriendRequestsForUser ===');
+  console.log('userId:', userId);
+  
   await tryInitNative();
+  
+  // STEP 1: Fetch from API to get latest data
+  try {
+    const apiUrl = `${API_BASE_URL}/api/friends/pending/${userId}`;
+    console.log('Fetching from API:', apiUrl);
+    
+    const response = await fetch(apiUrl);
+    if (response.ok) {
+      const apiData = await response.json();
+      console.log('API returned friend requests:', apiData);
+      
+      // Filter for incoming requests (where this user is the friendId)
+      // Handle both string and number types
+      const incoming = (apiData || []).filter((req: any) => {
+        const match = String(req.friendId) === String(userId) && req.status === 'pending';
+        console.log(`Checking: friendId=${req.friendId}, userId=${userId}, status=${req.status}, match=${match}`);
+        return match;
+      });
+      
+      console.log('Filtered incoming requests:', incoming);
+      
+      // STEP 2: Optionally sync to local database for offline access
+      if (useNative && nativeDb) {
+        for (const req of incoming) {
+          try {
+            // Check if already exists locally
+            const existing: any = await execSqlNative(
+              nativeDb, 
+              'SELECT * FROM friends WHERE friendRowId = ?;', 
+              [req.friendRowId || req.id]
+            );
+            
+            if (existing.rows._array.length === 0) {
+              // Insert into local DB
+              await execSqlNative(
+                nativeDb,
+                'INSERT OR REPLACE INTO friends (friendRowId, userId, friendId, status) VALUES (?, ?, ?, ?);',
+                [req.friendRowId || req.id, req.userId, req.friendId, req.status]
+              );
+            }
+          } catch (e) {
+            console.warn('Failed to sync friend request to local DB:', e);
+          }
+        }
+      }
+      
+      return incoming;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch from API, falling back to local:', error);
+  }
+  
+  // STEP 3: Fallback to local database if API fails
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE friendId = ? AND status = ?;', [userId, 'pending']);
+    const res: any = await execSqlNative(
+      nativeDb, 
+      'SELECT * FROM friends WHERE friendId = ? AND status = ?;', 
+      [userId, 'pending']
+    );
+    console.log('Local DB results:', res.rows._array);
     return res.rows._array as any[];
   }
+  
   const db = await loadFallback();
-  return db.friends.filter((f: any) => f.friendId === userId && f.status === 'pending');
+  const local = db.friends.filter((f: any) => 
+    String(f.friendId) === String(userId) && f.status === 'pending'
+  );
+  console.log('Fallback DB results:', local);
+  return local;
 }
 
 export async function getFriendsForUser(userId: number): Promise<any[]> {
+  console.log('=== getFriendsForUser ===');
+  console.log('userId:', userId);
+  
+  await tryInitNative();
+  
+  // STEP 1: Fetch from API to get latest friends
+  try {
+    const apiUrl = `${API_BASE_URL}/api/friends/user/${userId}`;
+    console.log('Fetching friends from API:', apiUrl);
+    
+    const response = await fetch(apiUrl);
+    if (response.ok) {
+      const apiData = await response.json();
+      console.log('API returned friends:', apiData);
+      
+      // Filter for accepted friends only
+      const acceptedFriends = (apiData || []).filter((f: any) => f.status === 'accepted');
+      console.log('Accepted friends:', acceptedFriends);
+      
+      // STEP 2: Sync to local database
+      if (useNative && nativeDb) {
+        for (const friend of acceptedFriends) {
+          try {
+            await execSqlNative(
+              nativeDb,
+              'INSERT OR REPLACE INTO friends (friendRowId, userId, friendId, status) VALUES (?, ?, ?, ?);',
+              [friend.friendRowId || friend.id, friend.userId, friend.friendId, friend.status]
+            );
+          } catch (e) {
+            console.warn('Failed to sync friend to local DB:', e);
+          }
+        }
+      }
+      
+      return acceptedFriends;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch friends from API, falling back to local:', error);
+  }
+  
+  // STEP 3: Fallback to local database if API fails
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(
+      nativeDb, 
+      'SELECT * FROM friends WHERE (userId = ? OR friendId = ?) AND status = ?;', 
+      [userId, userId, 'accepted']
+    );
+    console.log('Local DB friends:', res.rows._array);
+    return res.rows._array as any[];
+  }
+  
+  const db = await loadFallback();
+  const localFriends = db.friends.filter((f: any) => 
+    (f.userId === userId || f.friendId === userId) && f.status === 'accepted'
+  );
+  console.log('Fallback DB friends:', localFriends);
+  return localFriends;
+}
+
+// Return all friend rows referencing the given user (accepted or pending)
+export async function getFriendRowsForUser(userId: number): Promise<any[]> {
   await tryInitNative();
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE (userId = ? OR friendId = ?) AND status = ?;', [userId, userId, 'accepted']);
+    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM friends WHERE userId = ? OR friendId = ?;', [userId, userId]);
     return res.rows._array as any[];
   }
   const db = await loadFallback();
-  return db.friends.filter((f: any) => (f.userId === userId || f.friendId === userId) && f.status === 'accepted');
+  return db.friends.filter((f: any) => Number(f.userId) === Number(userId) || Number(f.friendId) === Number(userId));
 }
 
 export async function removeFriend(friendRowId: number) {
@@ -431,68 +920,267 @@ export async function removeFriend(friendRowId: number) {
 // ============================================================================
 
 export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; inviteRecipientId: number; status: string; }): Promise<number> {
+  console.log('=== createRsvp ===');
+  console.log('Creating RSVP:', rsvp);
+  
   await tryInitNative();
   let rsvpId: number;
+  
+  // STEP 1: Send to API first (for immediate cross-account sync)
+  try {
+    const apiUrl = `${API_BASE_URL}/api/rsvps/invite`;
+    console.log('Sending RSVP to API:', apiUrl);
+    
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: String(rsvp.eventId),
+        inviteRecipientId: String(rsvp.inviteRecipientId),
+        eventOwnerId: String(rsvp.eventOwnerId)
+      })
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      console.log('API response:', result);
+      
+      // Extract the rsvpId from API response
+      rsvpId = result.rsvpId || result.id || 0;
+      console.log('RSVP created with ID:', rsvpId);
+    } else {
+      throw new Error(`API returned ${response.status}`);
+    }
+  } catch (error) {
+    console.error('Failed to send RSVP to API:', error);
+    throw error; // Don't proceed if API fails
+  }
+  
+  // STEP 2: Store in local database for offline access
   const now = new Date().toISOString();
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO rsvps (eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?);', [rsvp.eventId, rsvp.eventOwnerId, rsvp.inviteRecipientId, rsvp.status, now, now]);
-    rsvpId = res.insertId ?? 0;
+    try {
+      await execSqlNative(
+        nativeDb, 
+        'INSERT OR REPLACE INTO rsvps (rsvpId, eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?);', 
+        [rsvpId, rsvp.eventId, rsvp.eventOwnerId, rsvp.inviteRecipientId, rsvp.status ?? 'no-reply', now, now]
+      );
+    } catch (e) {
+      console.warn('Failed to store in local DB:', e);
+    }
   } else {
     const db = await loadFallback();
-    rsvpId = nextId(db, 'rsvps');
-    db.rsvps.push({ rsvpId, ...rsvp, createdAt: now, updatedAt: now });
-    await saveFallback(db);
-  }
-  
-  // Sync to Firebase
-  if (FirebaseSync.isFirebaseSyncEnabled() && rsvpId) {
-    try {
-      await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp });
-    } catch (error) {
-      console.warn('Failed to sync RSVP to Firebase:', error);
+    // Check if already exists
+    const existingIndex = db.rsvps.findIndex((r: any) => r.rsvpId === rsvpId);
+    if (existingIndex === -1) {
+      db.rsvps.push({ rsvpId, ...rsvp, createdAt: now, updatedAt: now });
+      await saveFallback(db);
     }
   }
+  
+  // STEP 3: Sync to Firebase (if needed - API might already do this)
+  // if (FirebaseSync.isFirebaseSyncEnabled() && rsvpId) {
+  //   try {
+  //     await FirebaseSync.syncRsvpToFirebase({ rsvpId, ...rsvp });
+  //   } catch (error) {
+  //     console.warn('Failed to sync RSVP to Firebase:', error);
+  //   }
+  // }
+  
+  // Emit event
+  try { emit('outbound:rsvpCreated', { rsvpId, ...rsvp }); } catch (_) { }
   
   return rsvpId;
 }
 
 export async function getRsvpsForEvent(eventId: number): Promise<any[]> {
+  console.log('=== getRsvpsForEvent ===');
+  console.log('eventId:', eventId);
+  
   await tryInitNative();
+  
+  // STEP 1: Fetch from API to get latest RSVPs
+  try {
+    const apiUrl = `${API_BASE_URL}/api/rsvps/event/${eventId}`;
+    console.log('Fetching RSVPs from API:', apiUrl);
+    
+    const response = await fetch(apiUrl);
+    if (response.ok) {
+      const apiData = await response.json();
+      console.log('API returned RSVPs for event:', apiData);
+      
+      // STEP 2: Sync to local database
+      if (useNative && nativeDb) {
+        for (const rsvp of apiData) {
+          try {
+            await execSqlNative(
+              nativeDb,
+              'INSERT OR REPLACE INTO rsvps (rsvpId, eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?);',
+              [
+                rsvp.rsvpId || rsvp.id,
+                rsvp.eventId,
+                rsvp.eventOwnerId,
+                rsvp.inviteRecipientId,
+                rsvp.status,
+                rsvp.createdAt || new Date().toISOString(),
+                rsvp.updatedAt || new Date().toISOString()
+              ]
+            );
+          } catch (e) {
+            console.warn('Failed to sync RSVP to local DB:', e);
+          }
+        }
+      }
+      
+      return apiData;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch RSVPs from API, falling back to local:', error);
+  }
+  
+  // STEP 3: Fallback to local database if API fails
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM rsvps WHERE eventId = ?;', [eventId]);
+    const res: any = await execSqlNative(
+      nativeDb, 
+      'SELECT * FROM rsvps WHERE eventId = ?;', 
+      [eventId]
+    );
+    console.log('Local DB RSVPs:', res.rows._array);
     return res.rows._array as any[];
   }
+  
   const db = await loadFallback();
-  return db.rsvps.filter((r: any) => r.eventId === eventId);
+  const localRsvps = db.rsvps.filter((r: any) => r.eventId === eventId);
+  console.log('Fallback DB RSVPs:', localRsvps);
+  return localRsvps;
 }
 
 export async function getRsvpsForUser(userId: number): Promise<any[]> {
+  console.log('=== getRsvpsForUser ===');
+  console.log('userId:', userId);
+  
   await tryInitNative();
-  if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'SELECT * FROM rsvps WHERE inviteRecipientId = ? OR eventOwnerId = ?;', [userId, userId]);
-    return res.rows._array as any[];
+  
+  try {
+    const apiUrl = `${API_BASE_URL}/api/rsvps/user/${userId}/pending`;  // ✅ Add /pending
+    console.log('Fetching RSVPs from API:', apiUrl);
+    
+    const response = await fetch(apiUrl);
+    if (response.ok) {
+      const apiData = await response.json();
+      console.log('API returned RSVPs:', apiData);
+      
+      // No need to filter - endpoint already returns pending only
+      console.log('Pending RSVPs:', apiData);
+      
+      // Sync to local database
+      if (useNative && nativeDb) {
+        for (const rsvp of apiData) {
+          try {
+            await execSqlNative(
+              nativeDb,
+              'INSERT OR REPLACE INTO rsvps (rsvpId, eventId, eventOwnerId, inviteRecipientId, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?);',
+              [
+                rsvp.rsvpId || rsvp.id, 
+                rsvp.eventId, 
+                rsvp.eventOwnerId, 
+                rsvp.inviteRecipientId, 
+                rsvp.status,
+                rsvp.createdAt || new Date().toISOString(),
+                rsvp.updatedAt || new Date().toISOString()
+              ]
+            );
+          } catch (e) {
+            console.warn('Failed to sync RSVP to local DB:', e);
+          }
+        }
+      }
+      
+      return apiData;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch RSVPs from API, falling back to local:', error);
   }
+  
+  // Fallback to local database if API fails
+  if (useNative && nativeDb) {
+    const res: any = await execSqlNative(
+      nativeDb, 
+      'SELECT * FROM rsvps WHERE inviteRecipientId = ?;', 
+      [userId]
+    );
+    console.log('Local DB RSVPs:', res.rows._array);
+    // Filter for pending locally
+    return (res.rows._array || []).filter((r: any) => 
+      r.status === 'pending' || r.status === 'no-reply'
+    );
+  }
+  
   const db = await loadFallback();
-  return db.rsvps.filter((r: any) => r.inviteRecipientId === userId || r.eventOwnerId === userId);
+  const localRsvps = db.rsvps.filter((r: any) => 
+    r.inviteRecipientId === userId && 
+    (r.status === 'pending' || r.status === 'no-reply')
+  );
+  console.log('Fallback DB RSVPs:', localRsvps);
+  return localRsvps;
 }
 
-export async function updateRsvp(rsvpId: number, updates: { status?: string; }) {
+export async function updateRsvp(rsvpId: number | string, updates: { status?: string; }) {
+  console.log('=== updateRsvp ===');
+  console.log('rsvpId:', rsvpId);
+  console.log('updates:', updates);
+  
   await tryInitNative();
   const now = new Date().toISOString();
   
+  // STEP 1: Update via API first
+  try {
+    const apiUrl = `${API_BASE_URL}/api/rsvps/${rsvpId}/status`;
+    console.log('Updating RSVP via API:', apiUrl);
+    console.log('Status:', updates.status);
+    
+    const response = await fetch(apiUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: updates.status  // Send as object with status field
+      })
+    });
+    
+    console.log('Response status:', response.status);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('API error:', errorText);
+      throw new Error(`API returned ${response.status}: ${errorText}`);
+    }
+    
+    console.log('RSVP updated via API successfully');
+  } catch (error) {
+    console.error('Failed to update RSVP via API:', error);
+    throw error;
+  }
+  
+  // STEP 2: Update local database
   if (useNative && nativeDb) {
-    await execSqlNative(nativeDb, 'UPDATE rsvps SET status = ?, updatedAt = ? WHERE rsvpId = ?;', [updates.status, now, rsvpId]);
+    await execSqlNative(
+      nativeDb, 
+      'UPDATE rsvps SET status = ?, updatedAt = ? WHERE rsvpId = ?;', 
+      [updates.status, now, rsvpId]
+    );
   } else {
     const db = await loadFallback();
-    const idx = db.rsvps.findIndex((r: any) => r.rsvpId === rsvpId);
+    const idx = db.rsvps.findIndex((r: any) => 
+      String(r.rsvpId) === String(rsvpId)
+    );
     if (idx !== -1) {
       db.rsvps[idx] = { ...db.rsvps[idx], ...updates, updatedAt: now };
       await saveFallback(db);
     }
   }
   
-  // Sync to Firebase
+  // STEP 3: Sync to Firebase (only if still enabled - but you should disable it)
   if (FirebaseSync.isFirebaseSyncEnabled()) {
     try {
       await FirebaseSync.updateRsvpInFirebase(rsvpId, updates);
@@ -533,12 +1221,12 @@ export async function createEvent(event: { userId: number; eventTitle?: string |
   const title = event.eventTitle ?? 'Untitled Event';
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO events (userId, eventTitle, description, startTime, endTime, isEvent, recurring, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?);', [event.userId, title, event.description ?? null, event.startTime, event.endTime ?? null, event.isEvent ?? 1, event.recurring ?? 0, event.date ?? null]);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO events (userId, eventTitle, description, startTime, endTime, isEvent, recurring, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?);', [event.userId ?? 0, title ?? '', event.description ?? '', event.startTime ?? '', event.endTime ?? '', event.isEvent ?? 1, event.recurring ?? 0, event.date ?? '']);
     eventId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     eventId = nextId(db, 'events');
-    db.events.push({ eventId, userId: event.userId, eventTitle: title, description: event.description ?? null, startTime: event.startTime, endTime: event.endTime ?? null, date: event.date ?? null, isEvent: event.isEvent ?? 1, recurring: event.recurring ?? 0 });
+    db.events.push({ eventId, userId: Number(event.userId ?? 0), eventTitle: title ?? '', description: event.description ?? '', startTime: event.startTime ?? '', endTime: event.endTime ?? '', date: event.date ?? '', isEvent: Number(event.isEvent ?? 1), recurring: Number(event.recurring ?? 0) });
     await saveFallback(db);
   }
   
@@ -550,6 +1238,35 @@ export async function createEvent(event: { userId: number; eventTitle?: string |
       console.warn('Failed to sync event to Firebase:', error);
     }
   }
+
+  // After creating an event, invite all accepted friends of the owner by creating RSVPs.
+  // This ensures friends are invited to new events automatically. We avoid creating
+  // duplicate RSVPs by checking for existing RSVP rows for the same event/invitee.
+  (async () => {
+    try {
+      const ownerId = Number(event.userId);
+      if (!ownerId) return;
+      const friends = await getFriendsForUser(ownerId); // returns accepted friends
+      const inviteeIds = new Set<number>();
+      for (const f of friends) {
+        const other = Number(f.userId) === ownerId ? Number(f.friendId) : Number(f.userId);
+        if (!other || other === ownerId) continue;
+        inviteeIds.add(other);
+      }
+      if (inviteeIds.size === 0) return;
+      const existingRsvps = await getRsvpsForEvent(Number(eventId));
+      for (const invitee of Array.from(inviteeIds)) {
+        const already = (existingRsvps || []).find((r: any) => Number(r.inviteRecipientId) === Number(invitee));
+        if (!already) {
+          try {
+            await createRsvp({ eventId: Number(eventId), eventOwnerId: ownerId, inviteRecipientId: invitee, status: 'pending' });
+          } catch (e) { /* ignore per-invite errors */ }
+        }
+      }
+    } catch (e) {
+      // ignore background invite errors
+    }
+  })();
   
   return eventId;
 }
@@ -644,12 +1361,12 @@ export async function addNotification(note: { userId: number; notifMsg: string; 
   let notificationId: number;
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO notifications (userId, notifMsg, notifType, createdAt) VALUES (?, ?, ?, ?);', [note.userId, note.notifMsg, note.notifType ?? null, note.timestamp ?? new Date().toISOString()]);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO notifications (userId, notifMsg, notifType, createdAt) VALUES (?, ?, ?, ?);', [note.userId ?? 0, note.notifMsg ?? '', note.notifType ?? '', note.timestamp ?? new Date().toISOString()]);
     notificationId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     notificationId = nextId(db, 'notifications');
-    db.notifications.push({ notificationId, userId: note.userId, notifMsg: note.notifMsg, notifType: note.notifType ?? null, createdAt: note.timestamp ?? new Date().toISOString() });
+    db.notifications.push({ notificationId, userId: Number(note.userId ?? 0), notifMsg: note.notifMsg ?? '', notifType: note.notifType ?? '', createdAt: note.timestamp ?? new Date().toISOString() });
     await saveFallback(db);
   }
   
@@ -730,7 +1447,7 @@ export async function setUserPreferences(userId: number, prefs: { theme?: number
     if (idx !== -1) {
       db.user_prefs[idx] = { ...db.user_prefs[idx], ...prefs, updatedAt: new Date().toISOString() };
     } else {
-      db.user_prefs.push({ preferenceId: nextId(db, 'user_prefs'), userId, theme: prefs.theme ?? 0, notificationEnabled: prefs.notificationEnabled ?? 1, colorScheme: prefs.colorScheme ?? 0, updatedAt: new Date().toISOString() });
+      db.user_prefs.push({ preferenceId: nextId(db, 'user_prefs'), userId: Number(userId ?? 0), theme: prefs.theme ?? 0, notificationEnabled: prefs.notificationEnabled ?? 1, colorScheme: prefs.colorScheme ?? 0, updatedAt: new Date().toISOString() });
     }
     await saveFallback(db);
   }
@@ -743,6 +1460,8 @@ export async function setUserPreferences(userId: number, prefs: { theme?: number
       console.warn('Failed to sync preferences to Firebase:', error);
     }
   }
+  // Emit an outbound event to let sync push these preferences to backend
+  try { emit('outbound:preferencesUpdated', { userId, prefs }); } catch (_) { }
 }
 
 export async function getUserPreferences(userId: number): Promise<any | null> {
@@ -753,6 +1472,255 @@ export async function getUserPreferences(userId: number): Promise<any | null> {
   }
   const db = await loadFallback();
   return db.user_prefs.find((p: any) => p.userId === userId) ?? null;
+}
+
+// ============================================================================
+// DEDUPE HELPERS
+// ============================================================================
+
+export async function findUserDuplicates(): Promise<Array<{ keepId: number; duplicateIds: number[]; by: string }>> {
+  const users = await getAllUsers();
+  const seen = new Set<number>();
+  const groups: Array<{ keepId: number; duplicateIds: number[]; by: string }> = [];
+
+  const scoreUser = (u: any) => {
+    // Higher score => more complete / preferred as keeper
+    let s = 0;
+    if (u && u.username && String(u.username).trim().length > 0) s += 10;
+    if (u && u.email && String(u.email).trim().length > 0) s += 1;
+    return s;
+  };
+  // NOTE: We no longer use provider-specific IDs for grouping; fall back to email/name grouping below
+
+  // 2) Group by normalized email for remaining users
+  const byEmail: { [email: string]: any[] } = {};
+
+  const extractEmail = (u: any) => {
+    if (!u) return '';
+    // handle alternate property names that might hold email
+    const candidates = [u.email, u.userEmail, u.emailAddress, u.email_address, u.mail];
+    for (const c of candidates) {
+      if (c && String(c).trim().length > 0) return String(c).trim();
+    }
+    return '';
+  };
+
+  const normalizeEmail = (raw: string) => {
+    if (!raw) return '';
+    const e = String(raw).toLowerCase().trim();
+    const parts = e.split('@');
+    if (parts.length !== 2) return e;
+    let [local, domain] = parts;
+    // Remove plus tags and dots for Gmail/Googlemail addresses
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+      local = local.split('+')[0].replace(/\./g, '');
+      domain = 'gmail.com';
+    } else {
+      // For other providers, still strip plus tags (common pattern)
+      local = local.split('+')[0];
+    }
+    return `${local}@${domain}`;
+  };
+
+  users.forEach((u: any) => {
+    const raw = extractEmail(u);
+    const e = normalizeEmail(raw);
+    if (e) {
+      (byEmail[e] = byEmail[e] || []).push(u);
+    }
+  });
+  Object.keys(byEmail).forEach((email) => {
+    const arr = byEmail[email];
+    const unique = arr.filter(x => !seen.has(Number(x.userId)));
+    if (unique.length > 1) {
+      // choose keeper by completeness score
+      unique.sort((a: any, b: any) => {
+        const d = scoreUser(b) - scoreUser(a);
+        if (d !== 0) return d;
+        return Number(a.userId) - Number(b.userId);
+      });
+      const keeper = unique[0];
+      const dupIds = unique.slice(1).map(x => Number(x.userId));
+      dupIds.forEach(i => seen.add(i));
+      groups.push({ keepId: Number(keeper.userId), duplicateIds: dupIds, by: 'email' });
+    }
+  });
+
+  // 3) Group by username (fallback) for users missing email
+  const byName: { [name: string]: any[] } = {};
+  users.forEach((u: any) => {
+    const rawEmail = extractEmail(u);
+    const hasEmail = !!(rawEmail && String(rawEmail).trim().length > 0);
+    if (hasEmail) return; // skip users with email; they were handled above
+    const n = (u && (u.username || u.name)) ? String(u.username || u.name).toLowerCase().trim() : '';
+    if (n) (byName[n] = byName[n] || []).push(u);
+  });
+  Object.keys(byName).forEach((name) => {
+    const arr = byName[name];
+    if (arr.length > 1) {
+      arr.sort((a: any, b: any) => {
+        const d = scoreUser(b) - scoreUser(a);
+        if (d !== 0) return d;
+        return Number(a.userId) - Number(b.userId);
+      });
+      const keeper = arr[0];
+      const dupIds = arr.slice(1).map(x => Number(x.userId));
+      dupIds.forEach(i => seen.add(i));
+      groups.push({ keepId: Number(keeper.userId), duplicateIds: dupIds, by: 'username' });
+    }
+  });
+
+  return groups;
+}
+
+export async function mergeUsers(keepId: number, removeId: number): Promise<void> {
+  if (!keepId || !removeId || keepId === removeId) return;
+
+  // Disable Firebase sync while performing destructive local merges to avoid
+  // races where local deletes/rewrites are immediately pushed and re-create
+  // duplicates or inconsistent state on the backend. We restore the prior
+  // setting in a finally block below.
+  const prevSync = FirebaseSync.isFirebaseSyncEnabled();
+  try {
+    FirebaseSync.setFirebaseSyncEnabled(false);
+
+    // Prefer keeper selection policy: if the `removeId` row has a provider-specific id
+    // but the `keepId` row does not, swap them so we keep the row with that provider id.
+    try {
+      // Probe both users to allow potential swap logic in future; currently we
+      // just ensure lookups don't throw and continue.
+      const a = await getUserById(keepId);
+      const b = await getUserById(removeId);
+    } catch (e) {
+      // ignore any lookup errors and continue with provided ids
+    }
+
+  // NOTE: Do NOT move or delete events during user merges.
+  // Keeping events intact avoids side-effects where duplicate cleanup inadvertently
+  // changes event ownership or removes user-created events. RSVPs referencing
+  // events will be adjusted below to point to the keeper user where appropriate,
+  // but `events` rows themselves are left untouched.
+  const eventIdMap: { [oldId: number]: number } = {};
+
+  // 2) Move RSVPs: recreate with same eventId (no event recreation) but remapped userIds where needed,
+  // then delete the old RSVP entries. This updates ownership/invitee references without touching events.
+  const rsvps = await getRsvpsForUser(removeId);
+  for (const r of rsvps) {
+    const newOwner = (Number(r.eventOwnerId) === Number(removeId)) ? keepId : r.eventOwnerId;
+    const newInvitee = (Number(r.inviteRecipientId) === Number(removeId)) ? keepId : r.inviteRecipientId;
+    try {
+      await createRsvp({ eventId: Number(r.eventId), eventOwnerId: Number(newOwner), inviteRecipientId: Number(newInvitee), status: r.status });
+    } catch (e) {
+      // ignore creation errors but continue attempting to delete the old RSVP
+    }
+    try { await deleteRsvp(Number(r.rsvpId)); } catch (e) { /* ignore */ }
+  }
+
+  // 3) Move friends: recreate friendships for keepId and remove old
+  const friends = await getFriendsForUser(removeId);
+  const keepFriends = await getFriendsForUser(keepId);
+  const keepFriendSet = new Set<number>(keepFriends.map((f: any) => (f.userId === keepId ? f.friendId : f.userId)));
+  for (const f of friends) {
+    const other = (Number(f.userId) === Number(removeId)) ? f.friendId : f.userId;
+    if (Number(other) === Number(keepId)) {
+      // self-reference after merge — just remove
+      try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+      continue;
+    }
+    if (keepFriendSet.has(Number(other))) {
+      // already friends with keeper, remove old relation
+      try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+      continue;
+    }
+    // create friend relation under keepId
+    try {
+      const newRow = await sendFriendRequest(keepId, Number(other));
+      if (f.status === 'accepted') {
+        const requests = await getFriendRequestsForUser(keepId);
+        const req = requests.find((r2: any) => Number(r2.friendId) === Number(other));
+        if (req) await respondFriendRequest(req.friendRowId, true);
+      }
+    } catch (e) {
+      // ignore create errors
+    }
+    try { await removeFriend(f.friendRowId); } catch (e) { /* ignore */ }
+  }
+
+  // 4) Move notifications
+  const notes = await getNotificationsForUser(removeId);
+  for (const n of notes) {
+    try { await addNotification({ userId: keepId, notifMsg: n.notifMsg, notifType: n.notifType, timestamp: n.createdAt }); } catch (e) { /* ignore */ }
+  }
+  try { await clearNotificationsForUser(removeId); } catch (e) { /* ignore */ }
+
+  // 5) Merge preferences (keep existing keeper prefs, fill missing from remove)
+  try {
+    const fromPrefs = await getUserPreferences(removeId);
+    if (fromPrefs) {
+      const toPrefs = await getUserPreferences(keepId) || {};
+      const merged = {
+        theme: toPrefs.theme ?? fromPrefs.theme,
+        notificationEnabled: toPrefs.notificationEnabled ?? fromPrefs.notificationEnabled,
+        colorScheme: toPrefs.colorScheme ?? fromPrefs.colorScheme,
+      };
+      await setUserPreferences(keepId, merged as any);
+    }
+  } catch (e) { /* ignore */ }
+
+  // 6) Finally delete the removed user row
+  try {
+    await deleteUser(removeId);
+  } catch (e) {
+    console.warn('db.mergeUsers: failed to delete removed user', removeId, e);
+  }
+  
+  // end of merge operations — local DB has been adjusted without pushing to Firebase
+  return;
+  } finally {
+    // Restore previous Firebase sync setting
+    try {
+      FirebaseSync.setFirebaseSyncEnabled(prevSync);
+      console.log('db.mergeUsers: restored Firebase sync to', prevSync);
+    } catch (e) {
+      console.warn('db.mergeUsers: failed to restore Firebase sync flag', e);
+    }
+  }
+}
+
+export async function runDuplicateCleanup(options?: { dryRun?: boolean; autoMerge?: boolean }): Promise<any> {
+  const dryRun = options?.dryRun ?? true;
+  const autoMerge = options?.autoMerge ?? false;
+  const groups = await findUserDuplicates();
+  const report: any[] = [];
+  for (const g of groups) {
+    report.push({ keepId: g.keepId, duplicateIds: g.duplicateIds, by: g.by });
+  }
+
+  if (dryRun) return { dryRun: true, groups: report };
+
+  const results: any[] = [];
+  for (const g of groups) {
+    for (const dup of g.duplicateIds) {
+      if (autoMerge) {
+        try {
+          await mergeUsers(g.keepId, dup);
+          results.push({ keep: g.keepId, removed: dup, status: 'merged' });
+        } catch (e) {
+          results.push({ keep: g.keepId, removed: dup, status: 'failed', error: String(e) });
+        }
+      } else {
+        // destructive delete without merge is not implemented by default
+        results.push({ keep: g.keepId, removed: dup, status: 'skipped', reason: 'autoMerge disabled' });
+      }
+    }
+  }
+  return { dryRun: false, results };
+}
+
+// One-time migration: backfill provider-specific id fields across fallback/native tables
+export async function backfillFirebaseUids(): Promise<any> {
+  // Removed: backfillFirebaseUids — provider-specific IDs are no longer tracked locally
+  throw new Error('backfillFirebaseUids() removed: local storage no longer tracks provider-specific IDs');
 }
 
 export default {
@@ -768,8 +1736,10 @@ export default {
   // Friends
   sendFriendRequest,
   respondFriendRequest,
+  respondToFriendRequest,
   getFriendRequestsForUser,
   getFriendsForUser,
+  getFriendRowsForUser,
   removeFriend,
 
   // Events
@@ -800,7 +1770,14 @@ export default {
   
   // New helpers
   getUserByEmail,
+  resolveLocalUserId,
   getAllUsers,
+  getUserByFirebaseUid,
+  repairFirebaseUidUsernames,
+  // Dedupe helpers
+  findUserDuplicates,
+  mergeUsers,
+  runDuplicateCleanup,
 
   getStatus,
 };

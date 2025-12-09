@@ -6,13 +6,62 @@ import HomeScreen from '../screens/HomeScreen';
 import ApiTestScreen from '../screens/ApiTestScreen';
 // NEW: imports for auth state and sign-out
 import { useAuth } from '../features/auth/AuthProvider';
-import { auth } from '../lib/firebase.native';
+import firebase from '../lib/firebase';
+import db from '../lib/db';
+import { useEffect, useState } from 'react';
+import storage from '../lib/storage';
+import { on as onEvent } from '../lib/eventBus';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as simpleSync from '../lib/sync';
+import { signOut as firebaseSignOut } from 'firebase/auth';
 
 export default function TopNav({ navigation }: StackHeaderProps) {
   const t = useTheme();
   const currentRoute = useRoute();
   const { user } = useAuth(); // NEW
   const signedIn = !!user; // NEW
+  const [localDisplayName, setLocalDisplayName] = useState<string | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await db.init_db();
+        // Resolve local numeric user id (avoid relying on provider-specific IDs)
+        let uidToUse: number | null = null;
+        try {
+          uidToUse = await db.resolveLocalUserId();
+        } catch (e) { /* ignore */ }
+
+        if (!mounted) return;
+        if (uidToUse != null) {
+          const u = await db.getUserById(uidToUse);
+          if (mounted && u) {
+            setLocalDisplayName(u.username ?? u.userName ?? u.name ?? null);
+            return;
+          }
+        }
+
+        // try storage fallback (userName) before falling back to firebase
+        try {
+          const stored = await storage.getItem<string>('userName');
+          if (mounted && stored) {
+            setLocalDisplayName(stored);
+            return;
+          }
+        } catch (e) {
+          // ignore
+        }
+
+        // final fallback to Firebase user displayName or email
+        if (mounted) setLocalDisplayName(user?.displayName ?? user?.email ?? null);
+      } catch (e) {
+        // ignore
+      }
+    })();
+    const handler = (p: any) => { if (p && p.username) setLocalDisplayName(p.username); };
+    const unsubscribe = onEvent('user:updated', handler);
+    return () => { mounted = false; try { unsubscribe(); } catch (e) { /* ignore */ } };
+  }, [user]);
 
   const tabs = [
     { label: 'Test', route: 'ApiTest'},
@@ -63,7 +112,7 @@ export default function TopNav({ navigation }: StackHeaderProps) {
             {/* NEW: display user's email or name if signed in */}
             {signedIn && (
               <Text style={{ color: t.color.textMuted, fontSize: 12 }}>
-                {user?.displayName || user?.email}
+                {localDisplayName ?? user?.displayName ?? user?.email}
               </Text>
             )}
 
@@ -94,9 +143,50 @@ export default function TopNav({ navigation }: StackHeaderProps) {
             {/* jUSTIN: Sign Out button when signed in */}
             {signedIn && (
               <TouchableOpacity
-                onPress={() => {
-                  auth.signOut();
-                  console.log('[Auth] User signed out');
+                onPress={async () => {
+                  try {
+                    // Stop auto-sync first
+                    try { simpleSync.stopAutoSync(); } catch (_) { /* ignore */ }
+
+                    // Resolve firebase instance robustly (same pattern used elsewhere)
+                    let fb: any = firebase;
+                    if (!fb || !fb.auth) {
+                      try {
+                        const mod = await import('../lib/firebase');
+                        fb = (mod as any).default || mod;
+                      } catch (e) {
+                        try {
+                          const mod = await import('../lib/firebase.web');
+                          fb = { auth: (mod as any).auth };
+                        } catch (e2) {
+                          try { const mod = await import('../lib/firebase.native'); fb = { auth: (mod as any).auth }; } catch (_) { fb = null; }
+                        }
+                      }
+                    }
+
+                    if (fb && fb.auth) {
+                      try {
+                        // prefer the firebase/auth signOut helper
+                        await firebaseSignOut(fb.auth as any);
+                      } catch (e) {
+                        // fallback to instance method if helper fails
+                        try { if (typeof fb.auth.signOut === 'function') await fb.auth.signOut(); } catch (e2) { console.warn('[TopNav] signOut fallback failed', e2); }
+                      }
+                    } else {
+                      console.warn('[TopNav] No firebase.auth available to sign out');
+                    }
+
+                    // Clear local stored auth/session keys
+                    try { await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']); } catch (_) { /* ignore */ }
+                    try { await storage.removeItem('authToken'); await storage.removeItem('userId'); await storage.removeItem('userEmail'); await storage.removeItem('userName'); } catch (_) { /* ignore */ }
+
+                    // Notify other parts of the app
+                    try { const ev = (await import('../lib/eventBus')).emit; ev('auth:signedout'); } catch (_) { /* ignore */ }
+
+                    console.log('[Auth] User signed out');
+                  } catch (e) {
+                    console.warn('[TopNav] signOut failed', e);
+                  }
                 }}
                 activeOpacity={0.7}
                 style={{

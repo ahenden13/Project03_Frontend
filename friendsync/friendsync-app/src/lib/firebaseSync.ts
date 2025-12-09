@@ -45,22 +45,11 @@ export async function syncUserToFirebase(userData: {
   email: string;
   password?: string;
   phone_number?: string | null;
-  firebaseUid?: string; // ← NEW: Firebase UID to use as document ID
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    // Use Firebase UID as document ID if provided, otherwise fall back to email
-    let docId: string;
-    if (userData.firebaseUid) {
-      docId = userData.firebaseUid;
-    } else {
-      // Fallback: use email-based ID if no Firebase UID provided
-      docId = userData.email.toLowerCase().replace(/[^a-z0-9@._-]/g, '_');
-      console.warn('No Firebase UID provided, using email-based ID:', docId);
-    }
-    
-    const userRef = doc(firestore, 'users', docId);
+    // Use numeric userId as document ID to avoid relying on firebase UIDs
+    const userRef = doc(firestore, 'users', String(userData.userId));
     
     // Check if document exists to determine if we need createdAt
     const docSnap = await getDoc(userRef);
@@ -73,13 +62,15 @@ export async function syncUserToFirebase(userData: {
       phoneNumber: userData.phone_number || null,
       updatedAt: serverTimestamp(),
     };
+    // Include backend/server ID mapping if present
+    if ((userData as any).remote_user_id) userDataFirebase.remote_user_id = (userData as any).remote_user_id;
     
     // Only set createdAt for new documents
     if (isNewDoc) {
       userDataFirebase.createdAt = serverTimestamp();
-      console.log(`✨ Creating new user ${userData.email} (uid: ${docId})`);
+      console.log(`✨ Creating new user ${userData.email} (id: ${userRef.id})`);
     } else {
-      console.log(`📝 Updating existing user ${userData.email} (uid: ${docId})`);
+      console.log(`📝 Updating existing user ${userData.email} (id: ${userRef.id})`);
     }
     
     await setDoc(userRef, userDataFirebase, { merge: true });
@@ -97,35 +88,20 @@ export async function updateUserInFirebase(
     username?: string;
     email?: string;
     phone_number?: string | null;
-  },
-  firebaseUid?: string // ← NEW: Optional Firebase UID
+  }
 ): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    let userRef;
-    
-    if (firebaseUid) {
-      // Use Firebase UID directly if provided
-      userRef = doc(firestore, 'users', firebaseUid);
-    } else {
-      // Find the document by userId field
-      const usersRef = collection(firestore, 'users');
-      const userQuery = query(usersRef, where('userId', '==', userId));
-      const userDocs = await getDocs(userQuery);
-      
-      if (userDocs.empty) {
-        console.warn(`No user found with userId ${userId} in Firebase`);
-        return;
-      }
-      
-      userRef = userDocs.docs[0].ref;
-    }
+    const userRef = doc(firestore, 'users', String(userId));
     
     const firestoreUpdates: any = {
       ...updates,
       updatedAt: serverTimestamp(),
     };
+    if ((updates as any).remote_user_id !== undefined) {
+      firestoreUpdates.remote_user_id = (updates as any).remote_user_id ?? '';
+      delete (firestoreUpdates as any).remote_user_id;
+    }
     
     // Rename phone_number to phoneNumber for Firestore
     if (updates.phone_number !== undefined) {
@@ -140,27 +116,10 @@ export async function updateUserInFirebase(
   }
 }
 
-export async function deleteUserFromFirebase(userId: number, firebaseUid?: string): Promise<void> {
+export async function deleteUserFromFirebase(userId: number): Promise<void> {
   try {
     const firestore = await getFirestore();
-    
-    if (firebaseUid) {
-      // Use Firebase UID directly if provided
-      await deleteDoc(doc(firestore, 'users', firebaseUid));
-    } else {
-      // Find the user document by userId field
-      const usersRef = collection(firestore, 'users');
-      const userQuery = query(usersRef, where('userId', '==', userId));
-      const userDocs = await getDocs(userQuery);
-      
-      if (userDocs.empty) {
-        console.warn(`No user found with userId ${userId} in Firebase`);
-        return;
-      }
-      
-      // Delete the user document
-      await deleteDoc(userDocs.docs[0].ref);
-    }
+    await deleteDoc(doc(firestore, 'users', String(userId)));
     
     // Clean up related data in parallel
     const [prefsSnapshot, eventsSnapshot, friendsSnapshot] = await Promise.all([

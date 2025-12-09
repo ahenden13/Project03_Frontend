@@ -8,6 +8,7 @@ import { useTheme } from '../lib/ThemeProvider';
 import { Calendar } from 'react-native-big-calendar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import db from '../lib/db';
+import InviteFriendsModal from '../components/InviteFriendsModal';
 
 
 // --- Helper: shift date by N days ---
@@ -148,6 +149,9 @@ export default function HomeScreen() {
   const [selectedEvent, setSelectedEvent] = useState<any | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [ownerName, setOwnerName] = useState<string | null>(null);
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [inviteEventId, setInviteEventId] = useState<number | null>(null);
+  const [inviteEventOwnerId, setInviteEventOwnerId] = useState<number | null>(null);
 
   async function openEventModal(ev: any) {
     setSelectedEvent(ev);
@@ -155,9 +159,36 @@ export default function HomeScreen() {
     try {
       const ownerId = ev?.raw?.userId;
       if (ownerId != null) {
-        const u = await db.getUserById(Number(ownerId));
-        if (u && u.username) setOwnerName(u.username);
-        else setOwnerName(String(ownerId));
+        let resolved: any = null;
+        // try numeric id first
+        const asNum = Number(ownerId);
+        if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
+          try { resolved = await db.getUserById(asNum); } catch (_) { resolved = null; }
+        }
+        // try email lookup
+        if (!resolved && typeof ownerId === 'string' && ownerId.includes('@')) {
+          try { resolved = await db.getUserByEmail(String(ownerId)); } catch (_) { resolved = null; }
+        }
+        // try provider UID lookup
+        if (!resolved && typeof ownerId === 'string') {
+          try { resolved = await db.getUserByFirebaseUid(String(ownerId)); } catch (_) { resolved = null; }
+        }
+        if (resolved) {
+          setOwnerName(resolved.username ?? resolved.email ?? String(ownerId));
+        } else {
+          const asStr = String(ownerId);
+          setOwnerName(asStr);
+          // fallback: if numeric, scan all users for a match (username/email/firebase_uid)
+          if (/^\d+$/.test(asStr)) {
+            try {
+              const all = await db.getAllUsers();
+              const byId = all.find((u: any) => Number(u.userId) === Number(asStr));
+              const byFirebase = all.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === asStr);
+              const found = byId || byFirebase;
+              if (found) setOwnerName(found.username ?? found.email ?? asStr);
+            } catch (_) { /* ignore */ }
+          }
+        }
       } else {
         setOwnerName(null);
       }
@@ -290,10 +321,58 @@ export default function HomeScreen() {
                   <Text style={{ color: t.color.text, marginBottom: 12 }}>{ownerName ?? String(selectedEvent.raw.userId)}</Text>
                 </>
               )}
+              {/* Invite Friends button if this event has a backing eventId */}
+              {selectedEvent?.raw?.eventId ? (
+                <View style={{ padding: 12, borderTopWidth: 1, borderTopColor: '#eee' }}>
+                  <TouchableOpacity onPress={() => {
+                    // close the event modal so Invite modal appears on top
+                    try { closeEventModal(); } catch (_) { /* ignore */ }
+                    const eid = selectedEvent?.raw?.eventId;
+                    setInviteEventId(eid ?? null);
+                    setInviteEventOwnerId(selectedEvent?.raw?.userId ?? null);
+                    setInviteModalVisible(true);
+                  }} style={{ paddingVertical: 10, paddingHorizontal: 14, backgroundColor: '#3b82f6', borderRadius: 8, alignSelf: 'flex-end' }}>
+                    <Text style={{ color: '#fff', fontWeight: '700' }}>Invite Friends</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
             </ScrollView>
           </View>
         </View>
       </Modal>
+      <InviteFriendsModal
+        visible={inviteModalVisible}
+        onClose={() => {
+          setInviteModalVisible(false);
+          (async () => {
+            try {
+              const eid = inviteEventId ?? undefined;
+              if (!eid) return;
+              // attempt to fetch the backing event record and map to HomeScreen event shape
+              if (inviteEventOwnerId != null) {
+                const raw = await db.getEventsForUser(inviteEventOwnerId);
+                const r = (raw || []).find((x: any) => Number(x.eventId) === Number(eid));
+                if (r) {
+                  const mapped = {
+                    title: r.eventTitle ?? r.title ?? r.description ?? 'Event',
+                    start: r.startTime ? new Date(r.startTime) : new Date(),
+                    end: r.endTime ? new Date(r.endTime) : new Date(),
+                    type: (r.isEvent === 0 || r.isEvent === false) ? 'availability' : 'hosted',
+                    raw: r,
+                  };
+                  setSelectedEvent(mapped);
+                  setModalVisible(true);
+                }
+              }
+            } catch (e) {
+              console.warn('HomeScreen: failed to reopen event modal after invite close', e);
+            }
+          })();
+        }}
+        eventId={inviteEventId ?? 0}
+        currentUserId={currentUserId ?? 0}
+        eventOwnerId={inviteEventOwnerId}
+      />
     </Screen>
   );
 }
