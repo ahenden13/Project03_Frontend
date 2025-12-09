@@ -556,17 +556,53 @@ export default function CalendarScreen() {
       let mounted = true;
       (async () => {
         try {
+          // Load RSVPs and enrich each RSVP with the invitee's display name when possible
           if (e.eventId) {
-            const rr = await db.getRsvpsForEvent(e.eventId);
-            if (mounted) setRsvps(rr || []);
+            const rr = await db.getRsvpsForEvent(e.eventId) || [];
+            const enriched = await Promise.all(rr.map(async (r: any) => {
+              try {
+                if (r.inviteRecipientId != null) {
+                  const u = await db.getUserById(Number(r.inviteRecipientId));
+                  const name = u?.username ?? u?.email ?? (`user:${r.inviteRecipientId}`);
+                  return { ...r, inviteRecipientName: name };
+                }
+              } catch (_) {
+                // ignore per-item failure
+              }
+              return { ...r, inviteRecipientName: r.inviteRecipientId ? `user:${r.inviteRecipientId}` : null };
+            }));
+            if (mounted) setRsvps(enriched);
           } else {
-            setRsvps(null);
+            if (mounted) setRsvps(null);
           }
-          if (e.userId) {
-            const u = await db.getUserById(e.userId);
-            if (mounted) setOwnerName(u?.username ?? String(e.userId));
+
+          // Owner name: try multiple strategies to resolve a human-friendly name.
+          // Some records may store the owner as a numeric local id, a Firebase UID
+          // string, or (rarely) an email. Try numeric id first, then firebaseUid,
+          // then email. Fall back to showing the raw id to avoid empty UI.
+          if (e.userId || e.eventOwnerId || e.ownerId) {
+            const rawOwner = e.userId ?? e.eventOwnerId ?? e.ownerId;
+            try {
+              let resolved: any = null;
+              // Try numeric local id when possible
+              const asNum = Number(rawOwner);
+              if (Number.isFinite(asNum) && !Number.isNaN(asNum)) {
+                try { resolved = await db.getUserById(asNum); } catch (_) { resolved = null; }
+              }
+              // If numeric lookup failed, try firebase UID lookup
+              if (!resolved) {
+                try { resolved = await db.getUserByFirebaseUid(String(rawOwner)); } catch (_) { resolved = null; }
+              }
+              // If still unresolved, try email
+              if (!resolved && rawOwner && String(rawOwner).includes('@')) {
+                try { resolved = await db.getUserByEmail(String(rawOwner)); } catch (_) { resolved = null; }
+              }
+              if (mounted) setOwnerName(resolved?.username ?? resolved?.email ?? String(rawOwner));
+            } catch (_) {
+              if (mounted) setOwnerName(String(e.userId ?? e.eventOwnerId ?? e.ownerId));
+            }
           } else {
-            setOwnerName(null);
+            if (mounted) setOwnerName(null);
           }
         } catch (err) {
           // ignore
@@ -594,9 +630,12 @@ export default function CalendarScreen() {
             {rsvps && Array.isArray(rsvps) ? (
               <View style={{ marginTop: 10 }}>
                 <Text style={{ fontWeight: '600', color: t.color.text }}>Attendees</Text>
-                {rsvps.length === 0 ? <Text style={{ color: t.color.textMuted, marginTop: 4 }}>No RSVPs</Text> : rsvps.map((r: any) => (
-                  <Text key={r.rsvpId} style={{ color: t.color.text, marginTop: 4 }}>{r.inviteRecipientId ? `User ${r.inviteRecipientId} — ${r.status}` : `ID:${r.rsvpId} — ${r.status}`}</Text>
-                ))}
+                {rsvps.length === 0 ? <Text style={{ color: t.color.textMuted, marginTop: 4 }}>No RSVPs</Text> : rsvps.map((r: any) => {
+                  const name = r.inviteRecipientName ?? (r.inviteRecipientId ? `user:${r.inviteRecipientId}` : null);
+                  return (
+                    <Text key={r.rsvpId} style={{ color: t.color.text, marginTop: 4 }}>{name ? `${name} — ${r.status}` : `ID:${r.rsvpId} — ${r.status}`}</Text>
+                  );
+                })}
               </View>
             ) : null}
 

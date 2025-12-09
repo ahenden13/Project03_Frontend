@@ -10,7 +10,7 @@
     "noEmit": true,
     "allowJs": true,
     "resolveJsonModule": true,
-    "types": ["react", "react-native"]
+    "types": ["react", "react-native", "jest", "@testing-library/jest-native"]
   },
   "include": ["App.tsx", "src/**/*"]
 }

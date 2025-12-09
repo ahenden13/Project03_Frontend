@@ -13,6 +13,7 @@ import { auth, db as firestore } from "../../lib/firebase";
 import db from "../../lib/db";
 import * as simpleSync from "../../lib/sync";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { emit } from '../../lib/eventBus';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -213,6 +214,20 @@ export function useGoogleSignIn() {
       let localId: number | null = null;
       if (local && local.userId) {
         localId = Number(local.userId);
+        // If the existing local row has no username, populate it from Firebase displayName or email localpart
+        try {
+          if (!local.username || String(local.username).trim().length === 0) {
+            const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
+            await db.updateUser(localId, { username: uname });
+            try { emit('user:updated', { userId: localId, username: uname }); } catch (_) { /* ignore */ }
+          }
+          // Ensure firebaseUid is stored on the local row so future UID-based resolution works
+          if (u.uid && (!local.firebaseUid || String(local.firebaseUid).trim().length === 0)) {
+            try { await db.updateUser(localId, { firebaseUid: String(u.uid) }); } catch (_) { /* ignore */ }
+          }
+        } catch (e) {
+          // ignore update errors
+        }
       } else {
         const uname = u.displayName ? String(u.displayName).replace(/\s+/g, '_').toLowerCase() : (u.email ? String(u.email).split('@')[0] : `u${Date.now()}`);
         localId = await db.createUser({ username: uname, email: u.email || '', firebaseUid: u.uid });

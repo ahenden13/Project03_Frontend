@@ -197,6 +197,7 @@ export async function syncEventToFirebase(eventData: {
   date?: string | null;
   isEvent?: number;
   recurring?: number;
+  userFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -209,6 +210,7 @@ export async function syncEventToFirebase(eventData: {
     const eventDataFirebase: any = {
       eventId: eventData.eventId,
       userId: eventData.userId,
+      userFirebaseUid: eventData.userFirebaseUid ?? null,
       eventTitle: eventData.eventTitle || null,
       description: eventData.description || null,
       startTime: eventData.startTime,
@@ -287,6 +289,8 @@ export async function syncFriendRequestToFirebase(friendData: {
   userId: number;
   friendId: number;
   status: string;
+  userFirebaseUid?: string | null;
+  friendFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -299,7 +303,9 @@ export async function syncFriendRequestToFirebase(friendData: {
     const friendDataFirebase: any = {
       friendRowId: friendData.friendRowId,
       userId: friendData.userId,
+      userFirebaseUid: friendData.userFirebaseUid ?? null,
       friendId: friendData.friendId,
+      friendFirebaseUid: friendData.friendFirebaseUid ?? null,
       status: friendData.status,
       updatedAt: serverTimestamp(),
     };
@@ -356,6 +362,8 @@ export async function syncRsvpToFirebase(rsvpData: {
   eventOwnerId: number;
   inviteRecipientId: number;
   status: string;
+  eventOwnerFirebaseUid?: string | null;
+  inviteRecipientFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -369,7 +377,9 @@ export async function syncRsvpToFirebase(rsvpData: {
       rsvpId: rsvpData.rsvpId,
       eventId: rsvpData.eventId,
       eventOwnerId: rsvpData.eventOwnerId,
+      eventOwnerFirebaseUid: rsvpData.eventOwnerFirebaseUid ?? null,
       inviteRecipientId: rsvpData.inviteRecipientId,
+      inviteRecipientFirebaseUid: rsvpData.inviteRecipientFirebaseUid ?? null,
       status: rsvpData.status,
       updatedAt: serverTimestamp(),
     };
@@ -426,6 +436,7 @@ export async function syncNotificationToFirebase(notifData: {
   notifMsg: string;
   notifType?: string | null;
   createdAt?: string;
+  userFirebaseUid?: string | null;
 }): Promise<void> {
   try {
     const firestore = await getFirestore();
@@ -434,6 +445,7 @@ export async function syncNotificationToFirebase(notifData: {
     await setDoc(notifRef, {
       notificationId: notifData.notificationId,
       userId: notifData.userId,
+      userFirebaseUid: notifData.userFirebaseUid ?? null,
       notifMsg: notifData.notifMsg,
       notifType: notifData.notifType || null,
       createdAt: notifData.createdAt || new Date().toISOString(),
@@ -472,13 +484,15 @@ export async function syncUserPreferencesToFirebase(
     theme?: number;
     notificationEnabled?: number;
     colorScheme?: number;
-  }
+  },
+  userFirebaseUid?: string | null
 ): Promise<void> {
   try {
     const firestore = await getFirestore();
     const prefsRef = doc(firestore, 'user_prefs', String(userId));
     
     await setDoc(prefsRef, {
+      userFirebaseUid: userFirebaseUid ?? null,
       userId,
       theme: prefs.theme ?? 0,
       notificationEnabled: prefs.notificationEnabled ?? 1,

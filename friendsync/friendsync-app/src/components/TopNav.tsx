@@ -7,12 +7,70 @@ import ApiTestScreen from '../screens/ApiTestScreen';
 // NEW: imports for auth state and sign-out
 import { useAuth } from '../features/auth/AuthProvider';
 import { auth } from '../lib/firebase.native';
+import db from '../lib/db';
+import { useEffect, useState } from 'react';
+import storage from '../lib/storage';
+import { on as onEvent } from '../lib/eventBus';
 
 export default function TopNav({ navigation }: StackHeaderProps) {
   const t = useTheme();
   const currentRoute = useRoute();
   const { user } = useAuth(); // NEW
   const signedIn = !!user; // NEW
+  const [localDisplayName, setLocalDisplayName] = useState<string | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await db.init_db();
+        // Prefer resolving by the currently signed-in Firebase UID when available
+        let uidToUse: number | null = null;
+        try {
+          if (user && user.uid) {
+            const byUid = await db.getUserByFirebaseUid(String(user.uid));
+            if (byUid && byUid.userId) uidToUse = Number(byUid.userId);
+          }
+        } catch (e) {
+          // ignore lookup errors
+        }
+
+        // If not found via auth UID, fall back to stored mappings
+        if (uidToUse == null) {
+          try {
+            uidToUse = await db.resolveLocalUserId();
+          } catch (e) { /* ignore */ }
+        }
+
+        if (!mounted) return;
+        if (uidToUse != null) {
+          const u = await db.getUserById(uidToUse);
+          if (mounted && u) {
+            setLocalDisplayName(u.username ?? u.userName ?? u.name ?? null);
+            return;
+          }
+        }
+
+        // try storage fallback (userName) before falling back to firebase
+        try {
+          const stored = await storage.getItem<string>('userName');
+          if (mounted && stored) {
+            setLocalDisplayName(stored);
+            return;
+          }
+        } catch (e) {
+          // ignore
+        }
+
+        // final fallback to Firebase user displayName or email
+        if (mounted) setLocalDisplayName(user?.displayName ?? user?.email ?? null);
+      } catch (e) {
+        // ignore
+      }
+    })();
+    const handler = (p: any) => { if (p && p.username) setLocalDisplayName(p.username); };
+    const unsubscribe = onEvent('user:updated', handler);
+    return () => { mounted = false; try { unsubscribe(); } catch (e) { /* ignore */ } };
+  }, [user]);
 
   const tabs = [
     { label: 'Test', route: 'ApiTest'},
@@ -63,7 +121,7 @@ export default function TopNav({ navigation }: StackHeaderProps) {
             {/* NEW: display user's email or name if signed in */}
             {signedIn && (
               <Text style={{ color: t.color.textMuted, fontSize: 12 }}>
-                {user?.displayName || user?.email}
+                {localDisplayName ?? user?.displayName ?? user?.email}
               </Text>
             )}
 
