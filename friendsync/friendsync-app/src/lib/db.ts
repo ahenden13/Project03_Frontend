@@ -21,6 +21,7 @@
 import { Platform } from 'react-native';
 import storage from './storage';
 import * as FirebaseSync from './firebaseSync';
+import { emit } from './eventBus';
 
 // ⚠️ TEMPORARILY DISABLE FIREBASE SYNC TO STOP DUPLICATES
 // FirebaseSync.setFirebaseSyncEnabled(false);  // ← ADD THIS LINE!
@@ -340,6 +341,55 @@ export async function getAllUsers(): Promise<any[]> {
   return db.users;
 }
 
+// Repair helper: when backend/client previously stored provider UIDs in the
+// `username` column (and `firebase_uid` is empty), migrate those values into
+// `firebase_uid` and create a friendlier username derived from email or a
+// generated handle. Returns the number of rows updated.
+export async function repairFirebaseUidUsernames(): Promise<number> {
+  const looksLikeUid = (v: any) => {
+    if (!v) return false;
+    try {
+      const s = String(v);
+      if (s.includes('@') || s.includes(' ')) return false;
+      return /^[A-Za-z0-9_-]{12,256}$/.test(s);
+    } catch { return false; }
+  };
+
+  await tryInitNative();
+  let updated = 0;
+  if (useNative && nativeDb) {
+    const all: any = await execSqlNative(nativeDb, 'SELECT * FROM users;');
+    for (const u of (all.rows._array as any[])) {
+      try {
+        if ((!u.firebase_uid || String(u.firebase_uid).trim().length === 0) && looksLikeUid(u.username)) {
+          const newFid = String(u.username);
+          let newName = '';
+          if (u.email && String(u.email).includes('@')) newName = String(u.email).split('@')[0]; else newName = `u${Date.now()}`;
+          await execSqlNative(nativeDb, 'UPDATE users SET firebase_uid = ?, username = ? WHERE userId = ?;', [newFid, newName, u.userId]);
+          updated++;
+        }
+      } catch (e) { /* ignore per-row errors */ }
+    }
+    return updated;
+  }
+
+  const db = await loadFallback();
+  for (let i = 0; i < db.users.length; i++) {
+    const u = db.users[i];
+    try {
+      if ((!u.firebase_uid || String(u.firebase_uid).trim().length === 0) && looksLikeUid(u.username)) {
+        const newFid = String(u.username);
+        let newName = '';
+        if (u.email && String(u.email).includes('@')) newName = String(u.email).split('@')[0]; else newName = `u${Date.now()}`;
+        db.users[i] = { ...u, firebase_uid: newFid, username: newName };
+        updated++;
+      }
+    } catch (e) { /* ignore per-row errors */ }
+  }
+  if (updated > 0) await saveFallback(db);
+  return updated;
+}
+
 export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | null> {
   if (!firebaseUid) return null;
   await tryInitNative();
@@ -435,6 +485,8 @@ export async function sendFriendRequest(userId: number, friendId: number): Promi
       console.warn('Failed to sync friend request to Firebase:', error);
     }
   }
+  // Emit an outbound event so other modules (sync) can push to the backend API
+  try { emit('outbound:friendCreated', { friendRowId, userId, friendId, status: 'pending' }); } catch (_) { }
   
   return friendRowId;
 }
@@ -571,6 +623,8 @@ export async function createRsvp(rsvp: { eventId: number; eventOwnerId: number; 
       console.warn('Failed to sync RSVP to Firebase:', error);
     }
   }
+  // Emit outbound event for backend sync
+  try { emit('outbound:rsvpCreated', { rsvpId, ...rsvp }); } catch (_) { }
   
   return rsvpId;
 }
@@ -890,6 +944,8 @@ export async function setUserPreferences(userId: number, prefs: { theme?: number
       console.warn('Failed to sync preferences to Firebase:', error);
     }
   }
+  // Emit an outbound event to let sync push these preferences to backend
+  try { emit('outbound:preferencesUpdated', { userId, prefs }); } catch (_) { }
 }
 
 export async function getUserPreferences(userId: number): Promise<any | null> {
@@ -1199,6 +1255,7 @@ export default {
   resolveLocalUserId,
   getAllUsers,
   getUserByFirebaseUid,
+  repairFirebaseUidUsernames,
   // Dedupe helpers
   findUserDuplicates,
   mergeUsers,

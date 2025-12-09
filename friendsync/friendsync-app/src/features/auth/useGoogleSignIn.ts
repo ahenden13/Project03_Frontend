@@ -14,6 +14,7 @@ import db from "../../lib/db";
 import * as simpleSync from "../../lib/sync";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { emit } from '../../lib/eventBus';
+import storage from '../../lib/storage';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -175,7 +176,11 @@ export function useGoogleSignIn() {
     const fb = (firebase && (firebase as any).auth && (firebase as any).db) ? firebase as any : await (async () => { try { const m = await import('../../lib/firebase'); return (m as any).default || m; } catch (e) { console.warn('[Auth] dynamic import firebase failed', e); return firebase as any; } })();
     if (fb && fb.auth) await signOut(fb.auth);
     
-    await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']);
+    try { await AsyncStorage.multiRemove(['authToken', 'userId', 'userEmail', 'userName']); } catch (_) { }
+    try { await storage.removeItem('authToken'); } catch (_) { }
+    try { await storage.removeItem('userId'); } catch (_) { }
+    try { await storage.removeItem('userEmail'); } catch (_) { }
+    try { await storage.removeItem('userName'); } catch (_) { }
     
     console.log("[Auth] Logged out and sync stopped");
 
@@ -199,28 +204,30 @@ export function useGoogleSignIn() {
       // 2. Get Firebase ID token
       const token = await user.getIdToken();
 
-      // 3. Save auth data to storage
-      await AsyncStorage.setItem('authToken', token);
-      await AsyncStorage.setItem('userEmail', user.email || '');
+      // 3. Save auth data to storage (both backends)
+      try { await AsyncStorage.setItem('authToken', token); } catch (_) { }
+      try { await storage.setItem('authToken', token); } catch (_) { }
+      try { await AsyncStorage.setItem('userEmail', user.email || ''); } catch (_) { }
+      try { await storage.setItem('userEmail', user.email || ''); } catch (_) { }
 
       // Ensure a local DB user exists for this signed-in user and store the local numeric id.
       // Mapping/creation is handled by `ensureLocalUserInDB` which is called during sign-in.
       // Here we only invoke it as a fallback when no `userId` is already present in storage.
       try {
-        const existingId = await AsyncStorage.getItem('userId');
-        if (!existingId) {
+        const existingId = await storage.getItem<string>('userId');
+        const existingAlt = existingId ?? await AsyncStorage.getItem('userId');
+        if (!existingAlt) {
           await ensureLocalUserInDB(user);
         }
       } catch (e) {
         console.warn('[Auth] failed to verify/create local user for signed-in account', e);
       }
 
-      // 4. Set up sync -- disabled temporarily
+      // 4. Set up sync
       simpleSync.setAuthToken(token);
 
-      // Start auto-sync using the local numeric user id saved by `ensureLocalUserInDB`.
-      // Pass numeric id if available otherwise resolve later in startAutoSync.
-      const storedLocal = await AsyncStorage.getItem('userId');
+      // Start auto-sync: prefer numeric id from the `storage` wrapper, fall back to AsyncStorage.
+      const storedLocal = await storage.getItem<string>('userId') ?? await AsyncStorage.getItem('userId');
       const localId = storedLocal ? Number(storedLocal) : null;
       simpleSync.startAutoSync(localId ?? user.uid);
 
@@ -271,16 +278,24 @@ export function useGoogleSignIn() {
         localId = await db.createUser({ username: uname, email: u.email || '', firebase_uid: u?.uid ?? null });
       }
       if (localId != null) {
-        await AsyncStorage.setItem('userId', String(localId));
-        await AsyncStorage.setItem('userEmail', u.email || '' );
+        // Persist to both AsyncStorage and the storage wrapper so all codepaths
+        // that read either backend will find the saved values.
+        try { await AsyncStorage.setItem('userId', String(localId)); } catch (_) { }
+        try { await storage.setItem('userId', String(localId)); } catch (_) { }
+        try { await AsyncStorage.setItem('userEmail', u.email || '' ); } catch (_) { }
+        try { await storage.setItem('userEmail', u.email || '' ); } catch (_) { }
         // store a human-friendly name for UI
         try {
           const lu = await db.getUserById(localId);
-          if (lu && lu.username) await AsyncStorage.setItem('userName', String(lu.username));
+          if (lu && lu.username) {
+            try { await AsyncStorage.setItem('userName', String(lu.username)); } catch (_) { }
+            try { await storage.setItem('userName', String(lu.username)); } catch (_) { }
+          }
         } catch (e) {
           // ignore
         }
-        // do not persist provider-specific UID locally
+        // provider-specific UID is stored on the DB row (firebase_uid) but we
+        // don't need to duplicate it into app-level storage.
       }
       return localId;
     } catch (err) {

@@ -35,8 +35,14 @@ export default function WelcomeScreen() {
 
     if (token && userId && userId !== 'null' && userId !== 'undefined') {
       // User is logged in, ensure sync is running
-      // simpleSync.setAuthToken(token);
-      // simpleSync.startAutoSync(userId); // This is already a string, which is fine
+      try {
+        simpleSync.setAuthToken(token);
+        // startAutoSync accepts string or number; pass stored userId directly
+        simpleSync.startAutoSync(userId);
+        console.log('[Welcome] Auto-sync started for resumed session (userId=', userId, ')');
+      } catch (e) {
+        console.warn('[Welcome] Failed to resume auto-sync', e);
+      }
       setSyncStatus("✓ logged in");
       console.log("[Welcome] Sync resumed for existing session");
     } else {
@@ -132,6 +138,32 @@ export default function WelcomeScreen() {
     }
   };
 
+  const repairUidUsernames = async () => {
+    setLoading(true);
+    setDump(null);
+    try {
+      const count = await db.repairFirebaseUidUsernames();
+      setDump(`Repaired ${count} user(s)`);
+    } catch (e: any) {
+      setDump(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runDiagnostic = async () => {
+    setLoading(true);
+    setDump(null);
+    try {
+      const r = await (simpleSync as any).diagnosticReport();
+      setDump(JSON.stringify(r, null, 2));
+    } catch (e: any) {
+      setDump(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <Screen>
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
@@ -174,9 +206,7 @@ export default function WelcomeScreen() {
           Welcome to FriendSync!
         </Text>
         </TouchableOpacity>
-        <Text style={{ color: t.color.textMuted, marginTop: t.space.sm }}>
-          Sign in button here
-        </Text>
+        
 
         {__DEV__ && (secretRevealed || (globalThis as any).__DEBUG_UI__) ? (
           <View style={{ marginTop: t.space.lg, width: "80%" }}>
@@ -198,6 +228,9 @@ export default function WelcomeScreen() {
               <Button title="Hide debug" onPress={() => { setSecretRevealed(false); setDump(null); setStatus(null); }} color={t.color.accent} />
             </View>
             <View style={{ marginTop: t.space.sm }}>
+              <Button title="Repair UID-like usernames" onPress={repairUidUsernames} color={t.color.accent} />
+            </View>
+            <View style={{ marginTop: t.space.sm }}>
               <View style={{ marginTop: t.space.xs }}>
                 <Button title="Refresh status" onPress={refreshStatus} color={t.color.accent} />
               </View>
@@ -212,6 +245,9 @@ export default function WelcomeScreen() {
               </View>
               <View style={{ marginTop: t.space.xs }}>
                 <Button title="Show fallback DB" onPress={showFallback} color={t.color.accent} />
+              </View>
+              <View style={{ marginTop: t.space.xs }}>
+                <Button title="Run sync diagnostic" onPress={runDiagnostic} color={'#2980b9'} />
               </View>
               <View style={{ marginTop: t.space.xs }}>
                 <Button title="Clear storage" onPress={clearStorage} color={'#c0392b'} />

@@ -13,6 +13,9 @@ import firebase from "../lib/firebase";
 import db from '../lib/db';
 import { emit, on as onEvent } from '../lib/eventBus';
 import storage from '../lib/storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as simpleSync from '../lib/sync';
+import { signOut as firebaseSignOut } from 'firebase/auth';
 import { MaterialIcons } from '@expo/vector-icons';
 
 
@@ -250,9 +253,22 @@ export default function SettingsScreen() {
         <Text style={{ color: t.color.textMuted, marginBottom: 8 }}>Signed in as {editingName || authCtx.user?.email}</Text>
 
         <TouchableOpacity
-          onPress={() => {
-            firebase.auth?.signOut();
-            console.log("[Auth] User signed out");
+          onPress={async () => {
+            try {
+              try { simpleSync.stopAutoSync(); } catch (_) { }
+              // Resolve firebase module
+              let fb: any = firebase;
+              if (!fb || !fb.auth) {
+                try { const mod = await import('../lib/firebase'); fb = (mod as any).default || mod; } catch (_) { fb = null; }
+              }
+              if (fb && fb.auth) {
+                try { await firebaseSignOut(fb.auth as any); } catch (e) { try { if (typeof fb.auth.signOut === 'function') await fb.auth.signOut(); } catch (_) { console.warn('Settings: signOut failed', e); } }
+              }
+              try { await AsyncStorage.multiRemove(['authToken','userId','userEmail','userName']); } catch (_) { }
+              try { await storage.removeItem('authToken'); await storage.removeItem('userId'); await storage.removeItem('userEmail'); await storage.removeItem('userName'); } catch (_) { }
+              try { emit('auth:signedout'); } catch (_) { }
+              console.log("[Auth] User signed out");
+            } catch (e) { console.warn('Settings: signOut error', e); }
           }}
           activeOpacity={0.8}
           style={{
