@@ -257,18 +257,23 @@ export async function createUser(user: {
   password?: string; 
   phone_number?: string | null;
   firebase_uid?: string | null;
+  // accept camelCase for callers that pass firebaseUid
+  firebaseUid?: string | null;
   remote_user_id?: string | null;
 }, opts?: { suppressOutbound?: boolean }): Promise<number> {
   await tryInitNative();
   let userId: number;
   
+  // Normalize firebase UID from either snake_case or camelCase
+  const fid = (user.firebase_uid ?? (user as any).firebaseUid) ?? '';
+
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid, remote_user_id) VALUES (?, ?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', user.firebase_uid ?? '', user.remote_user_id ?? '']);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid, remote_user_id) VALUES (?, ?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', fid ?? '', user.remote_user_id ?? '']);
     userId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     userId = nextId(db, 'users');
-    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: user.firebase_uid ?? '', remote_user_id: user.remote_user_id ?? '' });
+    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: fid ?? '', remote_user_id: user.remote_user_id ?? '' });
     await saveFallback(db);
   }
   
@@ -418,7 +423,10 @@ export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | n
     }
   }
   const db = await loadFallback();
-  return db.users.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(firebaseUid)) ?? null;
+  const found = db.users.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(firebaseUid)) ?? null;
+  if (!found) return null;
+  // normalize returned shape to include camelCase `firebaseUid` for consumers/tests
+  return { ...found, firebaseUid: found.firebase_uid ?? found.firebaseUid ?? undefined };
 }
 
 export async function getUserByRemoteId(remoteId: string | number): Promise<any | null> {

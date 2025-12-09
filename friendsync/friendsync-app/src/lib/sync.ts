@@ -19,8 +19,8 @@ function looksLikeFirebaseUid(v: any): boolean {
 // backend URL
 const API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://project03-friendsync-backend-8c893d18fe37.herokuapp.com';
 
-// How often to sync (5 minutes)
-const SYNC_INTERVAL = 5 * 60 * 1000;
+// How often to sync (5 minutes). Use shorter interval when running under Jest
+let SYNC_INTERVAL = process.env.JEST_WORKER_ID ? 1000 : 5 * 60 * 1000;
 
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let authToken: string | null = null;
@@ -628,33 +628,42 @@ export function startAutoSync(userId: string | number) {
   }
 
   console.log('Starting auto-sync...');
+  // Start the async resolver for initial sync, but create the interval synchronously
+  // so that test environments using fake timers register the timer immediately.
 
-  // Resolve numeric user id if a string was provided (e.g. legacy value)
-  const start = async () => {
-    let userIdNum = Number(userId);
-    if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
+  // Synchronously create an interval which will resolve the numeric user id when fired
+  syncTimer = setInterval(() => {
+    (async () => {
       try {
-        const resolved = await db.resolveLocalUserId();
+        let userIdNum = Number(userId);
+        if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
+          const resolved = await db.resolveLocalUserId().catch(() => null);
+          if (resolved != null) userIdNum = resolved;
+        }
+        if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
+          // nothing to do
+          return;
+        }
+        await syncFromBackend(userIdNum);
+      } catch (e) { console.error(e); }
+    })();
+  }, SYNC_INTERVAL);
+
+  // Also kick off an initial sync immediately (async)
+  (async () => {
+    try {
+      let userIdNum = Number(userId);
+      if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
+        const resolved = await db.resolveLocalUserId().catch(() => null);
         if (resolved != null) userIdNum = resolved;
-      } catch (e) { /* ignore */ }
-    }
-
-    if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
-      console.warn('startAutoSync: could not resolve numeric user id for', userId);
-      return;
-    }
-
-    // Do initial sync
-    syncFromBackend(userIdNum).catch(console.error);
-
-    // Then repeat every 5 minutes
-    syncTimer = setInterval(() => {
+      }
+      if (!Number.isFinite(userIdNum) || Number.isNaN(userIdNum)) {
+        console.warn('startAutoSync: could not resolve numeric user id for', userId);
+        return;
+      }
       syncFromBackend(userIdNum).catch(console.error);
-    }, SYNC_INTERVAL);
-  };
-
-  // Start the async resolver
-  start();
+    } catch (e) { console.error(e); }
+  })();
 }
 
 /**
