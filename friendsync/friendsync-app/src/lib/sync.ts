@@ -42,59 +42,6 @@ on('outbound:friendCreated', async (payload: any) => {
   } catch (e) { console.warn('sync: failed pushing friend to backend', e); }
 });
 
-// When a new local user is created, push to backend so server has the
-// canonical numeric `userId` and username mapping (use authToken if present)
-on('outbound:userCreated', async (payload: any) => {
-  try {
-    const body = { userId: payload.userId, username: payload.username, email: payload.email, firebase_uid: payload.firebase_uid };
-    const headers: any = { 'Content-Type': 'application/json' };
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-    await fetch(`${API_URL}/api/users`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
-    console.log('sync: pushed user to backend', body);
-  } catch (e) { console.warn('sync: failed pushing user to backend', e); }
-});
-
-// Listen for user updates and push changes to backend
-on('outbound:userUpdated', async (payload: any) => {
-  try {
-    const updates = payload.updates || {};
-    const body: any = { userId: payload.userId };
-    // Normalize known fields only to avoid sending arbitrary shapes
-    if (updates.username !== undefined && updates.username !== null) body.username = updates.username;
-    // prefer email field
-    if (updates.email !== undefined && updates.email !== null) body.email = updates.email;
-    // support both phone_number and phoneNumber
-    if (updates.phone_number !== undefined && updates.phone_number !== null) body.phone_number = updates.phone_number;
-    if (updates.phoneNumber !== undefined && updates.phoneNumber !== null) body.phone_number = updates.phoneNumber;
-    // support firebase uid variants
-    if (updates.firebase_uid !== undefined && updates.firebase_uid !== null) body.firebase_uid = updates.firebase_uid;
-    if (updates.firebaseUid !== undefined && updates.firebaseUid !== null) body.firebase_uid = updates.firebaseUid;
-    // fallback: if displayName provided and username not provided, use it
-    if (!body.username && updates.displayName) body.username = updates.displayName;
-
-    const headers: any = { 'Content-Type': 'application/json' };
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-    // Send only if we have more than just userId
-    const hasPayload = Object.keys(body).length > 1;
-    if (hasPayload) {
-      await fetch(`${API_URL}/api/users/${payload.userId}`, { method: 'PUT', headers, body: JSON.stringify(body) }).catch(() => null);
-      console.log('sync: pushed user update to backend', body);
-    } else {
-      console.log('sync: outbound:userUpdated had no normalized fields to push for user', payload.userId);
-    }
-  } catch (e) { console.warn('sync: failed pushing user update to backend', e); }
-});
-
-// Listen for deleted local users and forward to backend
-on('outbound:userDeleted', async (payload: any) => {
-  try {
-    const headers: any = { 'Content-Type': 'application/json' };
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-    await fetch(`${API_URL}/api/users/${payload.userId}`, { method: 'DELETE', headers }).catch(() => null);
-    console.log('sync: deleted user on backend', payload.userId);
-  } catch (e) { console.warn('sync: failed deleting user on backend', e); }
-});
-
 on('outbound:rsvpCreated', async (payload: any) => {
   try {
     const body = { rsvpId: payload.rsvpId, eventId: payload.eventId, eventOwnerId: payload.eventOwnerId, inviteRecipientId: payload.inviteRecipientId, status: payload.status };
@@ -113,6 +60,28 @@ on('outbound:preferencesUpdated', async (payload: any) => {
     await fetch(`${API_URL}/api/user-prefs`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
     console.log('sync: pushed prefs to backend', body);
   } catch (e) { console.warn('sync: failed pushing prefs to backend', e); }
+});
+
+// Push created/updated users to backend so server has username and local userId
+on('outbound:userCreated', async (payload: any) => {
+  try {
+    const body = { userId: payload.userId, username: payload.username, email: payload.email, firebase_uid: payload.firebase_uid };
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    await fetch(`${API_URL}/api/users`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
+    console.log('sync: pushed user created to backend', body);
+  } catch (e) { console.warn('sync: failed pushing user to backend', e); }
+});
+
+on('outbound:userUpdated', async (payload: any) => {
+  try {
+    const body = { userId: payload.userId, ...payload.updates };
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    // POST to users endpoint — backend should upsert by userId
+    await fetch(`${API_URL}/api/users`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
+    console.log('sync: pushed user updated to backend', body);
+  } catch (e) { console.warn('sync: failed pushing updated user to backend', e); }
 });
 
 /**
@@ -141,8 +110,16 @@ export async function syncFromBackend(userId: number): Promise<void> {
 
   try {
 
-    //convert userId to string for api calls
-    const userIdParam = String(userId);
+    //convert userId to string for api calls — prefer server/backend id (remote_user_id) when available
+    let userIdParam = String(userId);
+    try {
+      if (userId) {
+        const localRow = await db.getUserById(Number(userId)).catch(() => null);
+        if (localRow && localRow.remote_user_id && String(localRow.remote_user_id).trim().length > 0) {
+          userIdParam = String(localRow.remote_user_id);
+        }
+      }
+    } catch (e) { /* ignore and fall back to numeric id */ }
     // Resolve the provided userId (expect numeric local id)
     let localUserId: number | null = null;
     try {
@@ -183,10 +160,17 @@ export async function syncFromBackend(userId: number): Promise<void> {
     if (Array.isArray(allUsers)) {
       console.log('syncFromBackend: fetched users count=', allUsers.length);
       for (const user of allUsers) {
-        // Prefer matching by numeric userId first, then email
+        // Prefer matching by backend/server id first (remote_user_id), then numeric userId, then provider UID, then email
         let localMatch: any = null;
         try {
-          if (user.userId || user.id) localMatch = await db.getUserById(Number(user.userId ?? user.id));
+          const remoteId = user.userId ?? user.id ?? null;
+          if (remoteId != null) {
+            const byRemote = await db.getUserByRemoteId(remoteId).catch(() => null);
+            if (byRemote) localMatch = byRemote;
+          }
+        } catch (e) { /* ignore */ }
+        try {
+          if (!localMatch && (user.userId || user.id)) localMatch = await db.getUserById(Number(user.userId ?? user.id));
         } catch (e) { /* ignore */ }
         // Prefer matching by provider UID when available
         try {
@@ -223,6 +207,10 @@ export async function syncFromBackend(userId: number): Promise<void> {
           // If the backend provides a provider UID, persist it non-destructively
           const fid = user.firebaseUid ?? user.firebase_uid ?? user.uid ?? null;
           if (fid && String(localMatch.firebase_uid ?? '').trim().length === 0) updates.firebase_uid = String(fid);
+          // Persist backend/server id mapping if provided and missing locally
+          if ((user.userId ?? user.id ?? null) && (!localMatch.remote_user_id || String(localMatch.remote_user_id).trim().length === 0)) {
+            updates.remote_user_id = String(user.userId ?? user.id ?? '');
+          }
 
           if (Object.keys(updates).length > 0) {
             await db.updateUser(Number(localMatch.userId), updates);
@@ -259,6 +247,7 @@ export async function syncFromBackend(userId: number): Promise<void> {
               password: undefined,
               phone_number: user.phoneNumber || user.phone_number || null,
               firebase_uid: fid,
+              remote_user_id: String(user.userId ?? user.id ?? ''),
             });
             console.log(`syncFromBackend: created local user ${newLocalId} (${uname}) firebase_uid=${fid}`);
           }

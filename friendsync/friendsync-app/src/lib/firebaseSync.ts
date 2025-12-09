@@ -62,6 +62,8 @@ export async function syncUserToFirebase(userData: {
       phoneNumber: userData.phone_number || null,
       updatedAt: serverTimestamp(),
     };
+    // Include backend/server ID mapping if present
+    if ((userData as any).remote_user_id) userDataFirebase.remote_user_id = (userData as any).remote_user_id;
     
     // Only set createdAt for new documents
     if (isNewDoc) {
@@ -96,6 +98,10 @@ export async function updateUserInFirebase(
       ...updates,
       updatedAt: serverTimestamp(),
     };
+    if ((updates as any).remote_user_id !== undefined) {
+      firestoreUpdates.remote_user_id = (updates as any).remote_user_id ?? '';
+      delete (firestoreUpdates as any).remote_user_id;
+    }
     
     // Rename phone_number to phoneNumber for Firestore
     if (updates.phone_number !== undefined) {

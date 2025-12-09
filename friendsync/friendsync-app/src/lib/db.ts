@@ -83,7 +83,7 @@ async function loadFallback(): Promise<DBShape> {
   // Normalize/validate existing shape
   const normalized: DBShape = {
     __meta__: (val.__meta__ && typeof val.__meta__ === 'object') ? val.__meta__ : { nextId: {} },
-    users: Array.isArray(val.users) ? val.users.map((u: any) => ({ userId: Number(u.userId ?? 0), email: u.email ?? '', username: u.username ?? '', phone_number: u.phone_number ?? u.phoneNumber ?? '', firebase_uid: u.firebase_uid ?? u.firebaseUid ?? '' })) : [],
+    users: Array.isArray(val.users) ? val.users.map((u: any) => ({ userId: Number(u.userId ?? 0), email: u.email ?? '', username: u.username ?? '', phone_number: u.phone_number ?? u.phoneNumber ?? '', firebase_uid: u.firebase_uid ?? u.firebaseUid ?? '', remote_user_id: (u.remote_user_id ?? u.remoteId ?? u.serverId ?? u.userId ?? '') })) : [],
     friends: Array.isArray(val.friends) ? val.friends.map((f: any) => ({ friendRowId: Number(f.friendRowId ?? 0), userId: Number(f.userId ?? 0), friendId: Number(f.friendId ?? 0), status: f.status ?? 'pending' })) : [],
     rsvps: Array.isArray(val.rsvps) ? val.rsvps.map((r: any) => ({ rsvpId: Number(r.rsvpId ?? 0), createdAt: r.createdAt ?? '', eventId: Number(r.eventId ?? 0), eventOwnerId: Number(r.eventOwnerId ?? 0), inviteRecipientId: Number(r.inviteRecipientId ?? 0), status: r.status ?? 'pending', updatedAt: r.updatedAt ?? '' })) : [],
     user_prefs: Array.isArray(val.user_prefs) ? val.user_prefs.map((p: any) => ({ preferenceId: Number(p.preferenceId ?? 0), userId: Number(p.userId ?? 0), colorScheme: Number(p.colorScheme ?? 0), notificationEnabled: Number(p.notificationEnabled ?? 1), theme: Number(p.theme ?? 0), updatedAt: p.updatedAt ?? '' })) : [],
@@ -207,6 +207,12 @@ async function createNativeTables() {
   } catch (e) {
     // ignore if column already exists or ALTER not supported
   }
+  // Add remote_user_id to store backend/server-side user id mapping
+  try {
+    await execSqlNative(nativeDb, `ALTER TABLE users ADD COLUMN remote_user_id TEXT DEFAULT ''`);
+  } catch (e) {
+    // ignore if column already exists or ALTER not supported
+  }
 
   await execSqlNative(nativeDb, `CREATE TABLE IF NOT EXISTS notifications (
     notificationId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,17 +255,18 @@ export async function createUser(user: {
   password?: string; 
   phone_number?: string | null;
   firebase_uid?: string | null;
+  remote_user_id?: string | null;
 }): Promise<number> {
   await tryInitNative();
   let userId: number;
   
   if (useNative && nativeDb) {
-    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid) VALUES (?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', user.firebase_uid ?? '']);
+    const res: any = await execSqlNative(nativeDb, 'INSERT INTO users (email, username, phone_number, firebase_uid, remote_user_id) VALUES (?, ?, ?, ?, ?);', [user.email ?? '', user.username ?? '', user.phone_number ?? '', user.firebase_uid ?? '', user.remote_user_id ?? '']);
     userId = res.insertId ?? 0;
   } else {
     const db = await loadFallback();
     userId = nextId(db, 'users');
-    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: user.firebase_uid ?? '' });
+    db.users.push({ userId, username: user.username ?? '', email: user.email ?? '', phone_number: user.phone_number ?? '', firebase_uid: user.firebase_uid ?? '', remote_user_id: user.remote_user_id ?? '' });
     await saveFallback(db);
   }
   
@@ -271,15 +278,13 @@ export async function createUser(user: {
         username: user.username ?? '',
         email: user.email ?? '',
         phone_number: user.phone_number ?? null,
+        remote_user_id: user.remote_user_id ?? null,
       });
     } catch (error) {
       console.warn('Failed to sync user to Firebase:', error);
     }
   }
-
-  // Emit outbound event for backend sync so server-side API also gets the
-  // canonical numeric `userId` and `username`. Sync layer will listen for
-  // this event and POST to the REST API when an auth token is available.
+  // Emit outbound user created event so sync layer can push to backend API
   try { emit('outbound:userCreated', { userId, username: user.username ?? '', email: user.email ?? '', firebase_uid: user.firebase_uid ?? '' }); } catch (_) { }
   
   return userId;
@@ -410,6 +415,22 @@ export async function getUserByFirebaseUid(firebaseUid: string): Promise<any | n
   return db.users.find((u: any) => String(u.firebase_uid ?? u.firebaseUid ?? '') === String(firebaseUid)) ?? null;
 }
 
+export async function getUserByRemoteId(remoteId: string | number): Promise<any | null> {
+  if (remoteId == null) return null;
+  await tryInitNative();
+  const rid = String(remoteId);
+  if (useNative && nativeDb) {
+    try {
+      const res: any = await execSqlNative(nativeDb, 'SELECT * FROM users WHERE remote_user_id = ? LIMIT 1;', [rid]);
+      return (res.rows._array as any[])[0] ?? null;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  const db = await loadFallback();
+  return db.users.find((u: any) => String(u.remote_user_id ?? '') === rid) ?? null;
+}
+
 export async function updateUser(userId: number, updates: { username?: string; email?: string; phone_number?: string | null }) {
   await tryInitNative();
   
@@ -421,6 +442,7 @@ export async function updateUser(userId: number, updates: { username?: string; e
     if (updates.username !== undefined) { /* handled above */ }
     if (updates.phone_number !== undefined) { sets.push('phone_number = ?'); params.push(updates.phone_number ?? ''); }
     if ((updates as any).firebase_uid !== undefined) { sets.push('firebase_uid = ?'); params.push((updates as any).firebase_uid ?? ''); }
+    if ((updates as any).remote_user_id !== undefined) { sets.push('remote_user_id = ?'); params.push((updates as any).remote_user_id ?? ''); }
     if (sets.length === 0) return;
     params.push(userId);
     await execSqlNative(nativeDb, `UPDATE users SET ${sets.join(', ')} WHERE userId = ?;`, params);
@@ -441,8 +463,7 @@ export async function updateUser(userId: number, updates: { username?: string; e
       console.warn('Failed to update user in Firebase:', error);
     }
   }
-
-  // Emit outbound event so sync layer can notify backend API of the update
+  // Emit outbound user updated so sync layer can push changes to backend
   try { emit('outbound:userUpdated', { userId, updates }); } catch (_) { }
 }
 
@@ -465,9 +486,6 @@ export async function deleteUser(userId: number) {
       console.warn('Failed to delete user from Firebase:', error);
     }
   }
-
-  // Emit outbound event so sync layer can notify backend API
-  try { emit('outbound:userDeleted', { userId }); } catch (_) { }
 }
 
 // ============================================================================
